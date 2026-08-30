@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>costmap_lifecycle</name>
+  <version>0.1.0</version>
+  <description>Rust lifecycle driver + config for standalone nav2_costmap_2d</description>
+  <license>Apache-2.0</license>
+  <maintainer email="you@example.com">you</maintainer>
+
+  <buildtool_depend>ament_cargo</buildtool_depend>
+
+  <depend>rclrs</depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <export>
+    <build_type>ament_cargo</build_type>
+  </export>
+</package>
