@@ -56,6 +56,7 @@ fn main() -> Result<()> {
 
             let received = Arc::new(AtomicU64::new(0));
             let received_callback = Arc::clone(&received);
+            // TODO: REPLACE THIS, WE DON"T WNAT TO SUBSCRIBE TO /rslidar_points ANYMORE BAN ROS!!!!!!
             let _pointcloud_subscription = node.create_subscription::<PointCloud2, _>(
                 "/rslidar_points",
                 move |message: PointCloud2| {
