@@ -2,6 +2,16 @@
 // from Robosense Lidar rslidar_sdk
 #![allow(dead_code)]
 
+// evil
+use rclrs;
+use builtin_interfaces::msg::Time;
+use sensor_msgs::msg::{
+    PointCloud2 as RosPointCloud2,
+    PointField as RosPointField,
+};
+use std_msgs::msg::Header as RosHeader;
+//
+
 use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::sync::mpsc;
@@ -410,6 +420,35 @@ fn build_point_cloud(points: &[Point], ts: f64, frame_id: &str, dense: bool) -> 
     }
 }
 
+//evil
+fn to_ros_point_cloud(cloud: &PointCloud2) -> RosPointCloud2 {
+    RosPointCloud2 {
+        header: RosHeader {
+            stamp: Time {
+                sec: cloud.header.stamp_sec,
+                nanosec: cloud.header.stamp_nanosec,
+            },
+            frame_id: cloud.header.frame_id.clone(),
+        },
+        height: cloud.height,
+        width: cloud.width,
+        fields: cloud.fields.iter().map(|f| {
+            RosPointField {
+                name: f.name.to_string(),
+                offset: f.offset,
+                datatype: f.datatype,
+                count: f.count,
+            }
+        }).collect(),
+        is_bigendian: cloud.is_bigendian,
+        point_step: cloud.point_step,
+        row_step: cloud.row_step,
+        data: cloud.data.clone(),
+        is_dense: cloud.is_dense,
+    }
+}
+//
+
 // ---------------------------------------------------------------------------
 // decoder state machine (Decoder / DecoderMech / DecoderRSHELIOS)
 // ---------------------------------------------------------------------------
@@ -675,6 +714,21 @@ fn main() {
     };
     let cfg = DriverConfig::parse(&text);
 
+    //evil
+    let context = rclrs::Context::new(std::env::args())
+        .expect("failed to create ROS2 context");
+
+    let node = rclrs::create_node(&context, "rslidar_decoder")
+        .expect("failed to create ROS2 node");
+
+    let publisher = node
+        .create_publisher::<RosPointCloud2>(
+            "/rslidar_points",
+            rclrs::QOS_PROFILE_SENSOR_DATA,
+        )
+        .expect("failed to create PointCloud2 publisher");
+    //
+
     if cfg.lidar_type != "RSHELIOS" {
         eprintln!(
             "rslidar: warning: config.yaml selects lidar_type={}, but this script only \
@@ -717,6 +771,15 @@ fn main() {
                 for cloud in decoder.decode_msop(&buf) {
                     frame_count += 1;
                     print_frame_stats(frame_count, &cloud);
+
+                    //evil
+                    let ros_cloud = to_ros_point_cloud(&cloud);
+
+                        if let Err(e) = publisher.publish(ros_cloud) {
+                            eprintln!("rslidar: failed to publish point cloud: {e}");
+                        }
+                    }
+                    //
                 }
             }
         }

@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 rclrs = "*"
 nav2_msgs = "*"
+sensor_msgs = "*"
+std_msgs = "*"
+builtin_interfaces = "*"
