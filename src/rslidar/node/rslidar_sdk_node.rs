@@ -14,6 +14,7 @@
 
 use bevy::prelude::*;
 use bevy_points::prelude::*;
+use bevy_points::material::PointsShaderSettings;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
