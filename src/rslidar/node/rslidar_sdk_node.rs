@@ -775,8 +775,9 @@ fn main() {
                     //evil
                     let ros_cloud = to_ros_point_cloud(&cloud);
 
-                        if let Err(e) = publisher.publish(ros_cloud) {
-                            eprintln!("rslidar: failed to publish point cloud: {e}");
+                        match publisher.publish(ros_cloud) {
+                            Ok(() => println!(" published {frame_count}")),
+                            Err(e) => eprintln!("rslidar: failed to publish point cloud: {e}"),
                         }
                     }
                     //
