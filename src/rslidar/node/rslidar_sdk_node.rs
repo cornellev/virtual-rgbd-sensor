@@ -715,8 +715,10 @@ fn main() {
     let cfg = DriverConfig::parse(&text);
 
     //evil
-    let context = rclrs::Context::new(std::env::args())
+    let context = rclrs::Context::new(std::env::args(), rclrs::InitOptions::default())
         .expect("failed to create ROS2 context");
+
+    let mut executor = context.create_basic_executor();
 
     let node = rclrs::create_node(&context, "rslidar_decoder")
         .expect("failed to create ROS2 node");
