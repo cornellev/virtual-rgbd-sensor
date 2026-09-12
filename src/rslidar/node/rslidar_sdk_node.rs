@@ -12,16 +12,19 @@
 // use std_msgs::msg::Header as RosHeader;
 //
 
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy_points::prelude::*;
 use bevy_points::material::PointsShaderSettings;
+
+use pcap_file::pcap::PcapReader;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // RSHELIOS protocol constants (from decoder_RSHELIOS.hpp / decoder_mech.hpp)
 // Rn this will only work for our current LiDAR, so like for Ithaca365, need new
@@ -154,6 +157,14 @@ struct DriverConfig {
     end_angle: f32,
     wait_for_difop: bool,
     frame_id: String,
+
+    // Offline playback: when `pcap_path` is set, MSOP/DIFOP packets are read
+    // from that capture instead of live UDP sockets. `pcap_rate` scales
+    // playback speed relative to the capture's own timestamps (1.0 =
+    // realtime, 2.0 = 2x speed, etc); `pcap_repeat` loops the file forever.
+    pcap_path: Option<String>,
+    pcap_rate: f32,
+    pcap_repeat: bool,
 }
 
 impl DriverConfig {
@@ -174,6 +185,9 @@ impl DriverConfig {
             end_angle: scalar_or(text, "end_angle", 360.0f32),
             wait_for_difop: true,
             frame_id: find_scalar(text, "ros_frame_id").unwrap_or_else(|| "rslidar".into()),
+            pcap_path: find_scalar(text, "pcap_path"),
+            pcap_rate: scalar_or(text, "pcap_rate", 1.0f32),
+            pcap_repeat: scalar_or(text, "pcap_repeat", false),
         }
     }
 }
@@ -483,7 +497,11 @@ impl RsHeliosDecoder {
     fn new(cfg: &DriverConfig) -> Self {
         Self {
             distance_section: DistanceSection::new(cfg.min_distance, cfg.max_distance),
-            scan_section: AzimuthSection::new(cfg.start_angle, cfg.end_angle),
+            // start_angle/end_angle are plain degrees in config.yaml, but
+            // AzimuthSection (like the MSOP azimuth field itself) works in
+            // hundredths of a degree -- convert or a 0..360 config silently
+            // becomes a 0.00..3.60 degree wedge.
+            scan_section: AzimuthSection::new(cfg.start_angle * 100.0, cfg.end_angle * 100.0),
             split: SplitStrategyByAngle::new(0), // split_frame_mode=1 (by angle), split_angle=0
             cfg: cfg.clone(),
             angles_ready: false,
@@ -669,6 +687,150 @@ fn spawn_udp_reader(sock: UdpSocket, tag: fn(Vec<u8>) -> RawPacket, tx: mpsc::Se
     });
 }
 
+/// Parses an Ethernet (II) frame -- optionally carrying one 802.1Q VLAN tag
+/// -- down to its UDP payload. Returns the UDP destination port and payload
+/// slice, or `None` if the frame isn't IPv4/UDP. This is all a pcap capture
+/// of LiDAR traffic ever contains, so it's not a general packet parser.
+fn udp_payload_from_eth_frame(frame: &[u8]) -> Option<(u16, &[u8])> {
+    if frame.len() < 14 {
+        return None;
+    }
+    let mut off = 12; // skip destination + source MAC
+    let mut ethertype = be_u16(&frame[off..off + 2]);
+    off += 2;
+    if ethertype == 0x8100 {
+        // 802.1Q tag: 2 bytes tag control + 2 bytes real ethertype
+        if frame.len() < off + 4 {
+            return None;
+        }
+        ethertype = be_u16(&frame[off + 2..off + 4]);
+        off += 4;
+    }
+    if ethertype != 0x0800 {
+        return None; // not IPv4
+    }
+
+    let ip = frame.get(off..)?;
+    if ip.len() < 20 {
+        return None;
+    }
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    if ihl < 20 || ip.len() < ihl + 8 || ip[9] != 17 {
+        return None; // malformed header, or not UDP
+    }
+
+    let udp = &ip[ihl..];
+    let dst_port = be_u16(&udp[2..4]);
+    Some((dst_port, &udp[8..]))
+}
+
+/// Replays a pcap capture of MSOP/DIFOP traffic as if it were arriving live:
+/// packets are parsed down to their UDP payload, classified by destination
+/// port, and paced using the capture's own timestamps (scaled by `rate`) so
+/// the decoder's frame-splitting and timing logic behaves the same as it
+/// would against a real LiDAR.
+fn spawn_pcap_reader(
+    path: String,
+    msop_port: u16,
+    difop_port: u16,
+    rate: f32,
+    repeat: bool,
+    tx: mpsc::Sender<RawPacket>,
+) {
+    thread::spawn(move || {
+        let rate = if rate > 0.0 { rate } else { 1.0 };
+        loop {
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("rslidar: failed to open pcap {path}: {e}");
+                    return;
+                }
+            };
+            let mut reader = match PcapReader::new(file) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("rslidar: failed to parse pcap {path}: {e}");
+                    return;
+                }
+            };
+
+            let playback_start = Instant::now();
+            let mut pcap_t0: Option<Duration> = None;
+            let mut sent = 0u64;
+
+            while let Some(pkt) = reader.next_packet() {
+                let pkt = match pkt {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("rslidar: pcap read error: {e}");
+                        break;
+                    }
+                };
+
+                let t0 = *pcap_t0.get_or_insert(pkt.timestamp);
+                let target = pkt.timestamp.saturating_sub(t0).div_f32(rate);
+                let elapsed = playback_start.elapsed();
+                if target > elapsed {
+                    thread::sleep(target - elapsed);
+                }
+
+                let Some((dst_port, payload)) = udp_payload_from_eth_frame(&pkt.data) else {
+                    continue;
+                };
+                let raw = if dst_port == msop_port {
+                    RawPacket::Msop(payload.to_vec())
+                } else if dst_port == difop_port {
+                    RawPacket::Difop(payload.to_vec())
+                } else {
+                    continue;
+                };
+                if tx.send(raw).is_err() {
+                    return; // receiver gone, shut this thread down
+                }
+                sent += 1;
+            }
+
+            println!(
+                "rslidar: pcap playback finished ({sent} lidar packets from {path}); \
+                 leaving the last decoded frame on screen"
+            );
+            if !repeat {
+                return;
+            }
+        }
+    });
+}
+
+/// Sets up the MSOP/DIFOP packet source described by `cfg`: either live UDP
+/// sockets, or offline pcap replay when `cfg.pcap_path` is set.
+fn spawn_packet_source(cfg: &DriverConfig, tx: mpsc::Sender<RawPacket>) {
+    if let Some(path) = &cfg.pcap_path {
+        println!(
+            "rslidar: replaying pcap {path} (rate={}, repeat={})",
+            cfg.pcap_rate, cfg.pcap_repeat
+        );
+        spawn_pcap_reader(path.clone(), cfg.msop_port, cfg.difop_port, cfg.pcap_rate, cfg.pcap_repeat, tx);
+        return;
+    }
+
+    let msop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.msop_port))
+        .unwrap_or_else(|e| {
+            eprintln!("rslidar: failed to bind msop port {}: {e}", cfg.msop_port);
+            std::process::exit(1)
+        });
+    let difop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.difop_port))
+        .unwrap_or_else(|e| {
+            eprintln!("rslidar: failed to bind difop port {}: {e}", cfg.difop_port);
+            std::process::exit(1)
+        });
+    msop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+    difop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+
+    spawn_udp_reader(msop_sock, RawPacket::Msop, tx.clone());
+    spawn_udp_reader(difop_sock, RawPacket::Difop, tx);
+}
+
 fn print_frame_stats(idx: u64, cloud: &PointCloud2) {
     let (mut minx, mut miny, mut minz) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let (mut maxx, mut maxy, mut maxz) = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -732,8 +894,8 @@ struct CloudChannel(Mutex<mpsc::Receiver<Vec<VizPoint>>>);
 struct PointCloudEntity;
 
 fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<PointsMaterial>>) {
-    // Camera starts a few meters back looking at the origin. Move with
-    // WASD + Q/E, look around with the arrow keys (see `fly_camera`).
+    // Initial pose only -- `orbit_camera` recomputes this every frame from
+    // the `OrbitCamera` resource, which starts at this same position.
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -745,8 +907,11 @@ fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
         Mesh3d(meshes.add(PointsMesh::from_iter(std::iter::empty::<Vec3>()))),
         MeshMaterial3d(materials.add(PointsMaterial {
             settings: PointsShaderSettings {
-                point_size: 3.0,
-                color: Color::srgb(0.2, 1.0, 0.4).into(),
+                point_size: 0.05,
+                // White so it doesn't tint the per-vertex distance colors
+                // `drain_latest_cloud` assigns (the shader multiplies this
+                // uniform color by each point's vertex color).
+                color: Color::WHITE.into(),
                 ..default()
             },
             perspective: true,
@@ -755,6 +920,17 @@ fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
         })),
         PointCloudEntity,
     ));
+}
+
+const AXIS_LENGTH: f32 = 1.0;
+
+/// Draws an RGB (X/Y/Z) axis triad at the LiDAR origin every frame. Gizmos
+/// are immediate-mode, so this has to run each frame rather than spawning a
+/// one-off entity in `setup_scene`.
+fn draw_origin_axes(mut gizmos: Gizmos) {
+    gizmos.arrow(Vec3::ZERO, Vec3::X * AXIS_LENGTH, Color::srgb(1.0, 0.0, 0.0));
+    gizmos.arrow(Vec3::ZERO, Vec3::Y * AXIS_LENGTH, Color::srgb(0.0, 1.0, 0.0));
+    gizmos.arrow(Vec3::ZERO, Vec3::Z * AXIS_LENGTH, Color::srgb(0.0, 0.4, 1.0));
 }
 
 /// Pulls the most recently completed cloud off the channel (dropping any
@@ -777,32 +953,123 @@ fn drain_latest_cloud(
     let Some(cloud) = latest else { return };
     let Ok(mut mesh3d) = query.single_mut() else { return };
 
-    mesh3d.0 = meshes.add(PointsMesh::from_iter(
-        cloud.iter().map(|p| Vec3::new(p.x, p.y, p.z)),
-    ));
+    // The decoder emits points in the LiDAR/ROS convention (REP-103:
+    // x-forward, y-left, z-up), but Bevy is Y-up (+Y up, -Z forward). Passing
+    // (x, y, z) straight through renders LiDAR-up as depth, which looks like
+    // the whole cloud is tipped onto its side. Remap axes instead: Bevy's Y
+    // becomes LiDAR's z (up stays up), and Bevy's Z becomes -LiDAR's y (a
+    // proper rotation, not a mirror, so left/right stay consistent).
+    let vertices: Vec<Vec3> = cloud.iter().map(|p| Vec3::new(p.x, p.z, -p.y)).collect();
+
+    // RViz-style distance coloring: hue sweeps red (closest point in this
+    // frame) through orange/yellow/green to blue (farthest), normalized
+    // per-frame since a fixed range would waste most of the gradient on
+    // whatever part of [min_distance, max_distance] this frame doesn't use.
+    let distances: Vec<f32> = cloud
+        .iter()
+        .map(|p| (p.x * p.x + p.y * p.y + p.z * p.z).sqrt())
+        .collect();
+    let (min_d, max_d) = distances
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), &d| (mn.min(d), mx.max(d)));
+    let range = (max_d - min_d).max(1e-3);
+    let colors: Vec<Color> = distances
+        .iter()
+        .map(|&d| {
+            let t = ((d - min_d) / range).clamp(0.0, 1.0);
+            Color::hsl(t * 240.0, 1.0, 0.5) // 0deg = red, 240deg = blue
+        })
+        .collect();
+
+    let mut points_mesh = PointsMesh::from_iter(vertices);
+    points_mesh.colors = Some(colors);
+    mesh3d.0 = meshes.add(points_mesh);
 }
 
-/// Bare-bones fly camera: WASD to move, Q/E for up/down, arrow keys to look
-/// around. No mouse capture -- just enough to look around the cloud.
-fn fly_camera(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut Transform, With<Camera3d>>) {
+/// Orbit-camera state: the camera always looks at `target` from `distance`
+/// away, at the given `yaw`/`pitch` around it (spherical coordinates).
+#[derive(Resource)]
+struct OrbitCamera {
+    target: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+}
+
+impl Default for OrbitCamera {
+    fn default() -> Self {
+        // Matches the camera's original fixed start position of (5, 5, 5)
+        // looking at the origin, just expressed in spherical terms.
+        Self {
+            target: Vec3::ZERO,
+            yaw: std::f32::consts::FRAC_PI_4,
+            pitch: (1.0f32 / 3.0f32.sqrt()).asin(),
+            distance: 75.0f32.sqrt(),
+        }
+    }
+}
+
+const ORBIT_SENSITIVITY: f32 = 0.005;
+const ZOOM_SENSITIVITY: f32 = 0.5;
+const MIN_DISTANCE: f32 = 0.5;
+const MAX_DISTANCE: f32 = 500.0;
+const PITCH_LIMIT: f32 = 1.5; // radians; just short of straight up/down to avoid a gimbal flip
+
+/// Orbits the camera around `OrbitCamera::target` (the LiDAR origin by
+/// default): left-drag (or the arrow keys) rotates around it, the scroll
+/// wheel zooms, and WASD/QE re-center the target so you're not stuck
+/// orbiting one fixed point forever.
+fn orbit_camera(
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    mouse_scroll: Res<AccumulatedMouseScroll>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut orbit: ResMut<OrbitCamera>,
+    mut query: Query<&mut Transform, With<Camera3d>>,
+) {
     let Ok(mut transform) = query.single_mut() else { return };
     let dt = time.delta_secs();
 
-    let forward = transform.forward();
-    let right = transform.right();
-    let mut delta = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { delta += *forward; }
-    if keys.pressed(KeyCode::KeyS) { delta -= *forward; }
-    if keys.pressed(KeyCode::KeyA) { delta -= *right; }
-    if keys.pressed(KeyCode::KeyD) { delta += *right; }
-    if keys.pressed(KeyCode::KeyE) { delta += Vec3::Y; }
-    if keys.pressed(KeyCode::KeyQ) { delta -= Vec3::Y; }
-    transform.translation += delta * 5.0 * dt;
+    if mouse_buttons.pressed(MouseButton::Left) {
+        orbit.yaw -= mouse_motion.delta.x * ORBIT_SENSITIVITY;
+        orbit.pitch = (orbit.pitch - mouse_motion.delta.y * ORBIT_SENSITIVITY)
+            .clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+    if keys.pressed(KeyCode::ArrowLeft) { orbit.yaw += 1.5 * dt; }
+    if keys.pressed(KeyCode::ArrowRight) { orbit.yaw -= 1.5 * dt; }
+    if keys.pressed(KeyCode::ArrowUp) {
+        orbit.pitch = (orbit.pitch + 1.0 * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+    if keys.pressed(KeyCode::ArrowDown) {
+        orbit.pitch = (orbit.pitch - 1.0 * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
 
-    if keys.pressed(KeyCode::ArrowLeft) { transform.rotate_y(1.0 * dt); }
-    if keys.pressed(KeyCode::ArrowRight) { transform.rotate_y(-1.0 * dt); }
-    if keys.pressed(KeyCode::ArrowUp) { transform.rotate_local_x(0.5 * dt); }
-    if keys.pressed(KeyCode::ArrowDown) { transform.rotate_local_x(-0.5 * dt); }
+    orbit.distance = (orbit.distance - mouse_scroll.delta.y * ZOOM_SENSITIVITY)
+        .clamp(MIN_DISTANCE, MAX_DISTANCE);
+
+    // Pan along the view's flattened (yaw-only) basis so WASD/QE re-centers
+    // the orbit target without also fighting the current pitch.
+    let yaw_rot = Quat::from_rotation_y(orbit.yaw);
+    let forward_flat = yaw_rot * Vec3::NEG_Z;
+    let right_flat = yaw_rot * Vec3::X;
+    let mut pan = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) { pan += forward_flat; }
+    if keys.pressed(KeyCode::KeyS) { pan -= forward_flat; }
+    if keys.pressed(KeyCode::KeyA) { pan -= right_flat; }
+    if keys.pressed(KeyCode::KeyD) { pan += right_flat; }
+    if keys.pressed(KeyCode::KeyE) { pan += Vec3::Y; }
+    if keys.pressed(KeyCode::KeyQ) { pan -= Vec3::Y; }
+    let pan_speed = orbit.distance.max(1.0) * 0.5;
+    orbit.target += pan * pan_speed * dt;
+
+    let dir = Vec3::new(
+        orbit.pitch.cos() * orbit.yaw.sin(),
+        orbit.pitch.sin(),
+        orbit.pitch.cos() * orbit.yaw.cos(),
+    );
+    transform.translation = orbit.target + dir * orbit.distance;
+    transform.look_at(orbit.target, Vec3::Y);
 }
 
 // ---------------------------------------------------------------------------
@@ -836,27 +1103,13 @@ fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
         cfg.host_address, cfg.msop_port, cfg.difop_port, cfg.lidar_type
     );
 
-    let msop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.msop_port))
-        .unwrap_or_else(|e| {
-            eprintln!("rslidar: failed to bind msop port {}: {e}", cfg.msop_port);
-            std::process::exit(1)
-        });
-    let difop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.difop_port))
-        .unwrap_or_else(|e| {
-            eprintln!("rslidar: failed to bind difop port {}: {e}", cfg.difop_port);
-            std::process::exit(1)
-        });
-    msop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
-    difop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
-
     let (tx, rx) = mpsc::channel::<RawPacket>();
-    spawn_udp_reader(msop_sock, RawPacket::Msop, tx.clone());
-    spawn_udp_reader(difop_sock, RawPacket::Difop, tx);
+    spawn_packet_source(&cfg, tx);
 
     let mut decoder = RsHeliosDecoder::new(&cfg);
     let mut frame_count = 0u64;
 
-    println!("rslidar: waiting for DIFOP/MSOP packets from the LiDAR...");
+    println!("rslidar: waiting for DIFOP/MSOP packets...");
     for msg in rx {
         match msg {
             RawPacket::Difop(buf) => decoder.decode_difop(&buf),
@@ -893,85 +1146,15 @@ fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
 fn main() {
     let config_path = std::env::args().nth(1).unwrap_or_else(default_config_path);
 
-    let text = match std::fs::read_to_string(&config_path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("rslidar: failed to read config {config_path}: {e}");
-            std::process::exit(1)
-        }
-    };
-    let cfg = DriverConfig::parse(&text);
+    let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
+    thread::spawn(move || run_decoder(config_path, viz_tx));
 
-    //evil
-    // let context = rclrs::Context::new(std::env::args(), rclrs::InitOptions::default())
-    //     .expect("failed to create ROS2 context");
-
-    // let mut executor = context.create_basic_executor();
-
-    // let node = rclrs::create_node(&context, "rslidar_decoder")
-    //     .expect("failed to create ROS2 node");
-
-    // let publisher = node
-    //     .create_publisher::<RosPointCloud2>(
-    //         "/rslidar_points",
-    //         rclrs::QOS_PROFILE_SENSOR_DATA,
-    //     )
-    //     .expect("failed to create PointCloud2 publisher");
-    //
-
-    if cfg.lidar_type != "RSHELIOS" {
-        eprintln!(
-            "rslidar: warning: config.yaml selects lidar_type={}, but this script only \
-             implements the RSHELIOS MSOP/DIFOP layout. Decoding will likely fail.",
-            cfg.lidar_type
-        );
-    }
-
-    println!("rslidar: config loaded from {config_path}");
-    println!(
-        "rslidar: host_address={} msop_port={} difop_port={} lidar_type={}",
-        cfg.host_address, cfg.msop_port, cfg.difop_port, cfg.lidar_type
-    );
-
-    let msop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.msop_port))
-        .unwrap_or_else(|e| {
-            eprintln!("rslidar: failed to bind msop port {}: {e}", cfg.msop_port);
-            std::process::exit(1)
-        });
-    let difop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.difop_port))
-        .unwrap_or_else(|e| {
-            eprintln!("rslidar: failed to bind difop port {}: {e}", cfg.difop_port);
-            std::process::exit(1)
-        });
-    msop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
-    difop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
-
-    let (tx, rx) = mpsc::channel::<RawPacket>();
-    spawn_udp_reader(msop_sock, RawPacket::Msop, tx.clone());
-    spawn_udp_reader(difop_sock, RawPacket::Difop, tx);
-
-    let mut decoder = RsHeliosDecoder::new(&cfg);
-    let mut frame_count = 0u64;
-
-    println!("rslidar: waiting for DIFOP/MSOP packets from the LiDAR...");
-    for msg in rx {
-        match msg {
-            RawPacket::Difop(buf) => decoder.decode_difop(&buf),
-            RawPacket::Msop(buf) => {
-                for cloud in decoder.decode_msop(&buf) {
-                    frame_count += 1;
-                    print_frame_stats(frame_count, &cloud);
-
-                    //evil
-                    // let ros_cloud = to_ros_point_cloud(&cloud);
-
-                    // match publisher.publish(ros_cloud) {
-                    //     Ok(()) => println!(" published {frame_count}"),
-                    //     Err(e) => eprintln!("rslidar: failed to publish point cloud: {e}"),
-                    // }
-                    //
-                }
-            }
-        }
-    }
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(PointsPlugin)
+        .insert_resource(CloudChannel(Mutex::new(viz_rx)))
+        .insert_resource(OrbitCamera::default())
+        .add_systems(Startup, setup_scene)
+        .add_systems(Update, (drain_latest_cloud, orbit_camera, draw_origin_axes))
+        .run();
 }
