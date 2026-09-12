@@ -12,9 +12,13 @@
 // use std_msgs::msg::Header as RosHeader;
 //
 
+use bevy::prelude::*;
+use bevy_points::prelude::*;
+
 use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -700,6 +704,189 @@ fn default_config_path() -> String {
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("src/rslidar/config/config.yaml");
     p.to_string_lossy().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Bevy visualizer
+// ---------------------------------------------------------------------------
+
+/// A single decoded point, stripped of everything ROS-specific -- just
+/// enough to hand off to Bevy for rendering.
+#[derive(Clone, Copy)]
+struct VizPoint {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+/// Wraps the receiving end of the decoder -> visualizer channel as a Bevy
+/// resource. `mpsc::Receiver` isn't `Sync`, so it's wrapped in a `Mutex`;
+/// only `drain_latest_cloud` ever touches it.
+#[derive(Resource)]
+struct CloudChannel(Mutex<mpsc::Receiver<Vec<VizPoint>>>);
+
+/// Marks the one entity that holds the current point-cloud mesh, so
+/// `drain_latest_cloud` knows what to swap out each time a new frame lands.
+#[derive(Component)]
+struct PointCloudEntity;
+
+fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<PointsMaterial>>) {
+    // Camera starts a few meters back looking at the origin. Move with
+    // WASD + Q/E, look around with the arrow keys (see `fly_camera`).
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    // One entity holds the whole point cloud; its mesh gets replaced every
+    // time a new frame arrives.
+    commands.spawn((
+        Mesh3d(meshes.add(PointsMesh::from_iter(std::iter::empty::<Vec3>()))),
+        MeshMaterial3d(materials.add(PointsMaterial {
+            settings: PointsShaderSettings {
+                point_size: 3.0,
+                color: Color::srgb(0.2, 1.0, 0.4),
+                ..default()
+            },
+            perspective: true,
+            circle: true,
+            ..default()
+        })),
+        PointCloudEntity,
+    ));
+}
+
+/// Pulls the most recently completed cloud off the channel (dropping any
+/// older ones that piled up while the app was busy rendering) and rebuilds
+/// the point mesh from it.
+fn drain_latest_cloud(
+    channel: Res<CloudChannel>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut query: Query<&mut Mesh3d, With<PointCloudEntity>>,
+) {
+    let latest = {
+        let rx = channel.0.lock().unwrap();
+        let mut latest = None;
+        while let Ok(cloud) = rx.try_recv() {
+            latest = Some(cloud);
+        }
+        latest
+    };
+
+    let Some(cloud) = latest else { return };
+    let Ok(mut mesh3d) = query.single_mut() else { return };
+
+    mesh3d.0 = meshes.add(PointsMesh::from_iter(
+        cloud.iter().map(|p| Vec3::new(p.x, p.y, p.z)),
+    ));
+}
+
+/// Bare-bones fly camera: WASD to move, Q/E for up/down, arrow keys to look
+/// around. No mouse capture -- just enough to look around the cloud.
+fn fly_camera(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut query: Query<&mut Transform, With<Camera3d>>) {
+    let Ok(mut transform) = query.single_mut() else { return };
+    let dt = time.delta_secs();
+
+    let forward = transform.forward();
+    let right = transform.right();
+    let mut delta = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) { delta += *forward; }
+    if keys.pressed(KeyCode::KeyS) { delta -= *forward; }
+    if keys.pressed(KeyCode::KeyA) { delta -= *right; }
+    if keys.pressed(KeyCode::KeyD) { delta += *right; }
+    if keys.pressed(KeyCode::KeyE) { delta += Vec3::Y; }
+    if keys.pressed(KeyCode::KeyQ) { delta -= Vec3::Y; }
+    transform.translation += delta * 5.0 * dt;
+
+    if keys.pressed(KeyCode::ArrowLeft) { transform.rotate_y(1.0 * dt); }
+    if keys.pressed(KeyCode::ArrowRight) { transform.rotate_y(-1.0 * dt); }
+    if keys.pressed(KeyCode::ArrowUp) { transform.rotate_local_x(0.5 * dt); }
+    if keys.pressed(KeyCode::ArrowDown) { transform.rotate_local_x(-0.5 * dt); }
+}
+
+// ---------------------------------------------------------------------------
+// decoder thread + main
+// ---------------------------------------------------------------------------
+
+/// Runs the UDP capture + decode loop on a background thread, sending each
+/// completed frame's points to the Bevy app over `viz_tx`. Bevy owns the
+/// main thread (required for windowing on some platforms).
+fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
+    let text = match std::fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("rslidar: failed to read config {config_path}: {e}");
+            std::process::exit(1)
+        }
+    };
+    let cfg = DriverConfig::parse(&text);
+
+    if cfg.lidar_type != "RSHELIOS" {
+        eprintln!(
+            "rslidar: warning: config.yaml selects lidar_type={}, but this script only \
+             implements the RSHELIOS MSOP/DIFOP layout. Decoding will likely fail.",
+            cfg.lidar_type
+        );
+    }
+
+    println!("rslidar: config loaded from {config_path}");
+    println!(
+        "rslidar: host_address={} msop_port={} difop_port={} lidar_type={}",
+        cfg.host_address, cfg.msop_port, cfg.difop_port, cfg.lidar_type
+    );
+
+    let msop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.msop_port))
+        .unwrap_or_else(|e| {
+            eprintln!("rslidar: failed to bind msop port {}: {e}", cfg.msop_port);
+            std::process::exit(1)
+        });
+    let difop_sock = UdpSocket::bind((cfg.host_address.as_str(), cfg.difop_port))
+        .unwrap_or_else(|e| {
+            eprintln!("rslidar: failed to bind difop port {}: {e}", cfg.difop_port);
+            std::process::exit(1)
+        });
+    msop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+    difop_sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+
+    let (tx, rx) = mpsc::channel::<RawPacket>();
+    spawn_udp_reader(msop_sock, RawPacket::Msop, tx.clone());
+    spawn_udp_reader(difop_sock, RawPacket::Difop, tx);
+
+    let mut decoder = RsHeliosDecoder::new(&cfg);
+    let mut frame_count = 0u64;
+
+    println!("rslidar: waiting for DIFOP/MSOP packets from the LiDAR...");
+    for msg in rx {
+        match msg {
+            RawPacket::Difop(buf) => decoder.decode_difop(&buf),
+            RawPacket::Msop(buf) => {
+                for cloud in decoder.decode_msop(&buf) {
+                    frame_count += 1;
+                    print_frame_stats(frame_count, &cloud);
+
+                    let viz_points: Vec<VizPoint> = cloud
+                        .data
+                        .chunks_exact(cloud.point_step as usize)
+                        .filter_map(|chunk| {
+                            let x = f32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                            let y = f32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                            let z = f32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                            if x.is_nan() || y.is_nan() || z.is_nan() {
+                                None
+                            } else {
+                                Some(VizPoint { x, y, z })
+                            }
+                        })
+                        .collect();
+
+                    // Ignore send errors: they just mean the Bevy window
+                    // closed, at which point the decoder keeps running
+                    // harmlessly until the process exits.
+                    let _ = viz_tx.send(viz_points);
+                }
+            }
+        }
+    }
 }
 
 fn main() {
