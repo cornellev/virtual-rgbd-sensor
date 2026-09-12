@@ -746,7 +746,7 @@ fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
         MeshMaterial3d(materials.add(PointsMaterial {
             settings: PointsShaderSettings {
                 point_size: 3.0,
-                color: Color::srgb(0.2, 1.0, 0.4),
+                color: Color::srgb(0.2, 1.0, 0.4).into(),
                 ..default()
             },
             perspective: true,
