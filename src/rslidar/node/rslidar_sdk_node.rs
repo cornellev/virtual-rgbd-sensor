@@ -3,13 +3,13 @@
 #![allow(dead_code)]
 
 // evil
-use rclrs;
-use builtin_interfaces::msg::Time;
-use sensor_msgs::msg::{
-    PointCloud2 as RosPointCloud2,
-    PointField as RosPointField,
-};
-use std_msgs::msg::Header as RosHeader;
+// use rclrs;
+// use builtin_interfaces::msg::Time;
+// use sensor_msgs::msg::{
+//     PointCloud2 as RosPointCloud2,
+//     PointField as RosPointField,
+// };
+// use std_msgs::msg::Header as RosHeader;
 //
 
 use std::io::ErrorKind;
@@ -421,32 +421,32 @@ fn build_point_cloud(points: &[Point], ts: f64, frame_id: &str, dense: bool) -> 
 }
 
 //evil
-fn to_ros_point_cloud(cloud: &PointCloud2) -> RosPointCloud2 {
-    RosPointCloud2 {
-        header: RosHeader {
-            stamp: Time {
-                sec: cloud.header.stamp_sec,
-                nanosec: cloud.header.stamp_nanosec,
-            },
-            frame_id: cloud.header.frame_id.clone(),
-        },
-        height: cloud.height,
-        width: cloud.width,
-        fields: cloud.fields.iter().map(|f| {
-            RosPointField {
-                name: f.name.to_string(),
-                offset: f.offset,
-                datatype: f.datatype,
-                count: f.count,
-            }
-        }).collect(),
-        is_bigendian: cloud.is_bigendian,
-        point_step: cloud.point_step,
-        row_step: cloud.row_step,
-        data: cloud.data.clone(),
-        is_dense: cloud.is_dense,
-    }
-}
+// fn to_ros_point_cloud(cloud: &PointCloud2) -> RosPointCloud2 {
+//     RosPointCloud2 {
+//         header: RosHeader {
+//             stamp: Time {
+//                 sec: cloud.header.stamp_sec,
+//                 nanosec: cloud.header.stamp_nanosec,
+//             },
+//             frame_id: cloud.header.frame_id.clone(),
+//         },
+//         height: cloud.height,
+//         width: cloud.width,
+//         fields: cloud.fields.iter().map(|f| {
+//             RosPointField {
+//                 name: f.name.to_string(),
+//                 offset: f.offset,
+//                 datatype: f.datatype,
+//                 count: f.count,
+//             }
+//         }).collect(),
+//         is_bigendian: cloud.is_bigendian,
+//         point_step: cloud.point_step,
+//         row_step: cloud.row_step,
+//         data: cloud.data.clone(),
+//         is_dense: cloud.is_dense,
+//     }
+// }
 //
 
 // ---------------------------------------------------------------------------
@@ -715,20 +715,20 @@ fn main() {
     let cfg = DriverConfig::parse(&text);
 
     //evil
-    let context = rclrs::Context::new(std::env::args(), rclrs::InitOptions::default())
-        .expect("failed to create ROS2 context");
+    // let context = rclrs::Context::new(std::env::args(), rclrs::InitOptions::default())
+    //     .expect("failed to create ROS2 context");
 
-    let mut executor = context.create_basic_executor();
+    // let mut executor = context.create_basic_executor();
 
-    let node = rclrs::create_node(&context, "rslidar_decoder")
-        .expect("failed to create ROS2 node");
+    // let node = rclrs::create_node(&context, "rslidar_decoder")
+    //     .expect("failed to create ROS2 node");
 
-    let publisher = node
-        .create_publisher::<RosPointCloud2>(
-            "/rslidar_points",
-            rclrs::QOS_PROFILE_SENSOR_DATA,
-        )
-        .expect("failed to create PointCloud2 publisher");
+    // let publisher = node
+    //     .create_publisher::<RosPointCloud2>(
+    //         "/rslidar_points",
+    //         rclrs::QOS_PROFILE_SENSOR_DATA,
+    //     )
+    //     .expect("failed to create PointCloud2 publisher");
     //
 
     if cfg.lidar_type != "RSHELIOS" {
@@ -775,12 +775,12 @@ fn main() {
                     print_frame_stats(frame_count, &cloud);
 
                     //evil
-                    let ros_cloud = to_ros_point_cloud(&cloud);
+                    // let ros_cloud = to_ros_point_cloud(&cloud);
 
-                    match publisher.publish(ros_cloud) {
-                        Ok(()) => println!(" published {frame_count}"),
-                        Err(e) => eprintln!("rslidar: failed to publish point cloud: {e}"),
-                    }
+                    // match publisher.publish(ros_cloud) {
+                    //     Ok(()) => println!(" published {frame_count}"),
+                    //     Err(e) => eprintln!("rslidar: failed to publish point cloud: {e}"),
+                    // }
                     //
                 }
             }
