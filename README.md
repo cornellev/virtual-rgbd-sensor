@@ -1,11 +1,24 @@
 # Virtual RGBD Sensor
-## Tasks:
-1) Rewrite LiDAR PCAP packet -> sensor_msgs::msg::PointCloud2: DONE, read
-[this](src/rslidar/lidar.pdf) for impl deets
-2) sensor_msgs::msg::PointCloud2 -> nav2::msg::Costmap: SEMI-DONE but still ROS2 dependent
-3) Camera + sensor_msgs::msg::PointCloud2 -> RGBD
+## Features:
+1) Converted 32-channel RoboSense LiDAR outputs in the form of .pcap or MSOP/DIFOP packets to PointCloud2: ```(x, y, z, intensity, cluster_id)```.
+2) Implemented [Two-Layer-Graph Clustering](https://www.mdpi.com/2076-3417/10/23/8534) for 32-channel point cloud segmentation, per frame and without cross-frame matching and consistency.
+![segmentation_demo](/demos/segmentation.png)
+<video width="320" height="240" controls>
+  <source src="/demos/yay.mp4" type="video/mp4">
+</video>
 
-Some Docker instructions:
+3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust.
+![costmap_demo](/demos/occupancy_grid.png)
+
+## Recent Updates:
+
+|  Date     | Changelog / Update Notes |
+|:----------|:-----------|
+| 9/14/25  | - Integrated Two-Layer-Graph Clustering with the decoding of MSOP/DIFOP packets for optimized segmentation while point cloud are being processed. Specifically during the construction of the range and set graphs. |
+| 9/12/26   | - Tested ```rslidar_sdk_node.rs``` on online LiDAR and offline .pcap files. Also integrated simple Bevy visualizer for point clouds. | 
+| 9/8/26   | - Rewrote cpp ```rslidar_sdk``` with ```RSHeliosDecoder``` for RoboSense 32-channel LiDAR specifically. This is for converting offline .pcap or online MSOP/DIFOP packets to point clouds | 
+
+## Installation:
 Our LiDAR is pinged via 192.168.1.102:
 ```bash
 sudo ip link set enP8p1s0 up
