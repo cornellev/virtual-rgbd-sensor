@@ -2,26 +2,22 @@
 // from Robosense Lidar rslidar_sdk
 #![allow(dead_code)]
 
-// evil
-// use rclrs;
-// use builtin_interfaces::msg::Time;
-// use sensor_msgs::msg::{
-//     PointCloud2 as RosPointCloud2,
-//     PointField as RosPointField,
-// };
-// use std_msgs::msg::Header as RosHeader;
-//
+mod segmentation;
+mod visualization;
+use visualization::{
+    draw_origin_axes, drain_latest_cloud, orbit_camera, setup_scene, tune_seg_params, CloudChannel,
+    OrbitCamera, SegParamsHandle, VizPoint,
+};
 
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
-use bevy_points::prelude::*;
-use bevy_points::material::PointsShaderSettings;
+use bevy_points::prelude::PointsPlugin;
 
 use pcap_file::pcap::PcapReader;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -439,35 +435,6 @@ fn build_point_cloud(points: &[Point], ts: f64, frame_id: &str, dense: bool) -> 
     }
 }
 
-//evil
-// fn to_ros_point_cloud(cloud: &PointCloud2) -> RosPointCloud2 {
-//     RosPointCloud2 {
-//         header: RosHeader {
-//             stamp: Time {
-//                 sec: cloud.header.stamp_sec,
-//                 nanosec: cloud.header.stamp_nanosec,
-//             },
-//             frame_id: cloud.header.frame_id.clone(),
-//         },
-//         height: cloud.height,
-//         width: cloud.width,
-//         fields: cloud.fields.iter().map(|f| {
-//             RosPointField {
-//                 name: f.name.to_string(),
-//                 offset: f.offset,
-//                 datatype: f.datatype,
-//                 count: f.count,
-//             }
-//         }).collect(),
-//         is_bigendian: cloud.is_bigendian,
-//         point_step: cloud.point_step,
-//         row_step: cloud.row_step,
-//         data: cloud.data.clone(),
-//         is_dense: cloud.is_dense,
-//     }
-// }
-//
-
 // ---------------------------------------------------------------------------
 // decoder state machine (Decoder / DecoderMech / DecoderRSHELIOS)
 // ---------------------------------------------------------------------------
@@ -486,6 +453,18 @@ struct RsHeliosDecoder {
     split: SplitStrategyByAngle,
 
     points: Vec<Point>,
+    range_graph: segmentation::RangeGraph,
+    set_graph: segmentation::SetGraph,
+    // Real vertical angle (degrees) of each ring, indexed in the same
+    // user_chan-sorted order the range graph uses -- lets second_segmentation
+    // scale its cross-ring merge threshold by how far apart two rings
+    // actually are in elevation, instead of one flat constant for every pair.
+    ring_vert_deg: [f32; LASER_NUM],
+    // Live-tunable via the visualizer's keyboard controls (see
+    // visualization::tune_seg_params) -- read fresh each revolution instead
+    // of being a fixed literal, so a value changed there shows up here
+    // within about one revolution.
+    seg_params: Arc<Mutex<segmentation::SegParams>>,
     first_point_ts: f64,
     prev_point_ts: f64,
 
@@ -494,7 +473,7 @@ struct RsHeliosDecoder {
 }
 
 impl RsHeliosDecoder {
-    fn new(cfg: &DriverConfig) -> Self {
+    fn new(cfg: &DriverConfig, seg_params: Arc<Mutex<segmentation::SegParams>>) -> Self {
         Self {
             distance_section: DistanceSection::new(cfg.min_distance, cfg.max_distance),
             // start_angle/end_angle are plain degrees in config.yaml, but
@@ -510,6 +489,10 @@ impl RsHeliosDecoder {
             block_az_diff_const: 20, // matches DecoderMech's initial default
             fov_blind_ts_diff: 0.0,
             points: Vec::new(),
+            range_graph: segmentation::RangeGraph::new(),
+            set_graph: segmentation::SetGraph::new(),
+            ring_vert_deg: [0.0; LASER_NUM],
+            seg_params,
             first_point_ts: 0.0,
             prev_point_ts: 0.0,
             chan_tss: chan_tss(),
@@ -550,13 +533,22 @@ impl RsHeliosDecoder {
             ) {
                 self.chan_angles = ca;
                 self.angles_ready = true;
+                // user_chan[chan] is the ring a channel's points get inserted
+                // under (see RangeGraph::insert's call site below), so invert
+                // that same mapping here to get each ring's real vertical
+                // angle in degrees, ready for second_segmentation.
+                for chan in 0..LASER_NUM {
+                    let ring = self.chan_angles.user_chan[chan] as usize;
+                    self.ring_vert_deg[ring] = self.chan_angles.vert[chan] as f32 / 100.0;
+                }
             }
         }
     }
 
-    /// Feeds one raw MSOP UDP datagram in; returns every frame (point cloud)
-    /// that was completed while processing it (usually zero or one).
-    fn decode_msop(&mut self, raw: &[u8]) -> Vec<PointCloud2> {
+    /// Feeds one raw MSOP UDP datagram in; returns every frame (point cloud,
+    /// paired with the range graph built alongside it) that was completed
+    /// while processing it (usually zero or one).
+    fn decode_msop(&mut self, raw: &[u8]) -> Vec<(PointCloud2, segmentation::RangeGraph)> {
         let mut out = Vec::new();
 
         let off = self.cfg.user_layer_bytes as usize;
@@ -611,9 +603,35 @@ impl RsHeliosDecoder {
 
             if self.split.new_block(block_az) {
                 let frame_ts = if self.cfg.ts_first_point { self.first_point_ts } else { self.prev_point_ts };
+                // Swap in a fresh graph exactly when `self.points` resets, so
+                // the finished one always corresponds to the same revolution
+                // as the cloud it's paired with.
+                let mut finished_graph =
+                    std::mem::replace(&mut self.range_graph, segmentation::RangeGraph::new());
                 if !self.points.is_empty() {
+                    let iter_start = Instant::now();
+
+                    let (seg_enabled, th_d, th_z_deg, th_d_second, k_deg, z_weight, min_cluster_points, min_gap_m) = {
+                        let p = self.seg_params.lock().unwrap();
+                        (p.seg_enabled, p.th_d, p.th_z_deg, p.th_d_second, p.k_deg, p.z_weight, p.min_cluster_points, p.min_gap_m)
+                    };
+                    if seg_enabled {
+                        finished_graph.first_segmentation(&mut self.set_graph, th_d, th_z_deg.to_radians(), min_gap_m);
+                        self.set_graph.second_segmentation(
+                            &mut finished_graph, th_d_second, k_deg, z_weight, min_cluster_points, min_gap_m,
+                            &self.ring_vert_deg,
+                        );
+                    }
+
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
-                    out.push(cloud);
+
+                    println!(
+                        "rslidar: {:.3}ms{}",
+                        iter_start.elapsed().as_secs_f64() * 1000.0,
+                        if seg_enabled { "" } else { " (segmentation off, press Space to toggle)" },
+                    );
+
+                    out.push((cloud, finished_graph));
                 }
                 self.points.clear();
                 self.first_point_ts = block_ts;
@@ -643,6 +661,29 @@ impl RsHeliosDecoder {
                     let y = -distance * cv * sh - RX * sh0;
                     let z = distance * sv + RZ;
 
+                    // `chan` is the raw hardware channel, correct for
+                    // indexing `chan_angles.vert`/`.horiz` (calibration is
+                    // keyed by physical channel) -- but the *firing order* of
+                    // channels on this LiDAR is not sorted by vertical angle
+                    // (confirmed: chan_angles.vert in raw order is a scramble
+                    // of the real angle set, not monotonic). get_neighbors
+                    // assumes ring i and ring i+1 are vertically adjacent, so
+                    // the range graph's ring must be the angular rank
+                    // (user_chan), not the firing-order index -- using `chan`
+                    // directly here made "adjacent ring" mean "adjacent in
+                    // firing sequence", which is nearly unrelated to true
+                    // vertical adjacency and explains why physically-adjacent
+                    // points from the same instant were landing in unrelated
+                    // rings and never getting compared/merged at all.
+                    let ring = self.chan_angles.user_chan[chan] as usize;
+                    let point_idx = self.points.len() as i32;
+                    self.range_graph.insert(
+                        ring,
+                        azimuth_round(angle_horiz_final),
+                        x, y, z,
+                        distance,
+                        point_idx,
+                    );
                     self.points.push(Point { x, y, z, intensity: intensity as f32 });
                 } else if !self.cfg.dense_points {
                     self.points.push(Point { x: f32::NAN, y: f32::NAN, z: f32::NAN, intensity: 0.0 });
@@ -870,216 +911,17 @@ fn default_config_path() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Bevy visualizer
-// ---------------------------------------------------------------------------
-
-/// A single decoded point, stripped of everything ROS-specific -- just
-/// enough to hand off to Bevy for rendering.
-#[derive(Clone, Copy)]
-struct VizPoint {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-/// Wraps the receiving end of the decoder -> visualizer channel as a Bevy
-/// resource. `mpsc::Receiver` isn't `Sync`, so it's wrapped in a `Mutex`;
-/// only `drain_latest_cloud` ever touches it.
-#[derive(Resource)]
-struct CloudChannel(Mutex<mpsc::Receiver<Vec<VizPoint>>>);
-
-/// Marks the one entity that holds the current point-cloud mesh, so
-/// `drain_latest_cloud` knows what to swap out each time a new frame lands.
-#[derive(Component)]
-struct PointCloudEntity;
-
-fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<PointsMaterial>>) {
-    // Initial pose only -- `orbit_camera` recomputes this every frame from
-    // the `OrbitCamera` resource, which starts at this same position.
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    // One entity holds the whole point cloud; its mesh gets replaced every
-    // time a new frame arrives.
-    commands.spawn((
-        Mesh3d(meshes.add(PointsMesh::from_iter(std::iter::empty::<Vec3>()))),
-        MeshMaterial3d(materials.add(PointsMaterial {
-            settings: PointsShaderSettings {
-                point_size: 0.05,
-                // White so it doesn't tint the per-vertex distance colors
-                // `drain_latest_cloud` assigns (the shader multiplies this
-                // uniform color by each point's vertex color).
-                color: Color::WHITE.into(),
-                ..default()
-            },
-            perspective: true,
-            circle: true,
-            ..default()
-        })),
-        PointCloudEntity,
-    ));
-}
-
-const AXIS_LENGTH: f32 = 1.0;
-
-/// Draws an RGB (X/Y/Z) axis triad at the LiDAR origin every frame. Gizmos
-/// are immediate-mode, so this has to run each frame rather than spawning a
-/// one-off entity in `setup_scene`.
-fn draw_origin_axes(mut gizmos: Gizmos) {
-    gizmos.arrow(Vec3::ZERO, Vec3::X * AXIS_LENGTH, Color::srgb(1.0, 0.0, 0.0));
-    gizmos.arrow(Vec3::ZERO, Vec3::Y * AXIS_LENGTH, Color::srgb(0.0, 1.0, 0.0));
-    gizmos.arrow(Vec3::ZERO, Vec3::Z * AXIS_LENGTH, Color::srgb(0.0, 0.4, 1.0));
-}
-
-/// Pulls the most recently completed cloud off the channel (dropping any
-/// older ones that piled up while the app was busy rendering) and rebuilds
-/// the point mesh from it.
-fn drain_latest_cloud(
-    channel: Res<CloudChannel>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut query: Query<&mut Mesh3d, With<PointCloudEntity>>,
-) {
-    let latest = {
-        let rx = channel.0.lock().unwrap();
-        let mut latest = None;
-        while let Ok(cloud) = rx.try_recv() {
-            latest = Some(cloud);
-        }
-        latest
-    };
-
-    let Some(cloud) = latest else { return };
-    let Ok(mut mesh3d) = query.single_mut() else { return };
-
-    // The decoder emits points in the LiDAR/ROS convention (REP-103:
-    // x-forward, y-left, z-up), but Bevy is Y-up (+Y up, -Z forward). Passing
-    // (x, y, z) straight through renders LiDAR-up as depth, which looks like
-    // the whole cloud is tipped onto its side. Remap axes instead: Bevy's Y
-    // becomes LiDAR's z (up stays up), and Bevy's Z becomes -LiDAR's y (a
-    // proper rotation, not a mirror, so left/right stay consistent).
-    let vertices: Vec<Vec3> = cloud.iter().map(|p| Vec3::new(p.x, p.z, -p.y)).collect();
-
-    // RViz-style distance coloring: hue sweeps red (closest point in this
-    // frame) through orange/yellow/green to blue (farthest), normalized
-    // per-frame since a fixed range would waste most of the gradient on
-    // whatever part of [min_distance, max_distance] this frame doesn't use.
-    let distances: Vec<f32> = cloud
-        .iter()
-        .map(|p| (p.x * p.x + p.y * p.y + p.z * p.z).sqrt())
-        .collect();
-    let (min_d, max_d) = distances
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), &d| (mn.min(d), mx.max(d)));
-    let range = (max_d - min_d).max(1e-3);
-    let colors: Vec<Color> = distances
-        .iter()
-        .map(|&d| {
-            let t = ((d - min_d) / range).clamp(0.0, 1.0);
-            Color::hsl(t * 240.0, 1.0, 0.5) // 0deg = red, 240deg = blue
-        })
-        .collect();
-
-    let mut points_mesh = PointsMesh::from_iter(vertices);
-    points_mesh.colors = Some(colors);
-    mesh3d.0 = meshes.add(points_mesh);
-}
-
-/// Orbit-camera state: the camera always looks at `target` from `distance`
-/// away, at the given `yaw`/`pitch` around it (spherical coordinates).
-#[derive(Resource)]
-struct OrbitCamera {
-    target: Vec3,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-}
-
-impl Default for OrbitCamera {
-    fn default() -> Self {
-        // Matches the camera's original fixed start position of (5, 5, 5)
-        // looking at the origin, just expressed in spherical terms.
-        Self {
-            target: Vec3::ZERO,
-            yaw: std::f32::consts::FRAC_PI_4,
-            pitch: (1.0f32 / 3.0f32.sqrt()).asin(),
-            distance: 75.0f32.sqrt(),
-        }
-    }
-}
-
-const ORBIT_SENSITIVITY: f32 = 0.005;
-const ZOOM_SENSITIVITY: f32 = 0.5;
-const MIN_DISTANCE: f32 = 0.5;
-const MAX_DISTANCE: f32 = 500.0;
-const PITCH_LIMIT: f32 = 1.5; // radians; just short of straight up/down to avoid a gimbal flip
-
-/// Orbits the camera around `OrbitCamera::target` (the LiDAR origin by
-/// default): left-drag (or the arrow keys) rotates around it, the scroll
-/// wheel zooms, and WASD/QE re-center the target so you're not stuck
-/// orbiting one fixed point forever.
-fn orbit_camera(
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mouse_motion: Res<AccumulatedMouseMotion>,
-    mouse_scroll: Res<AccumulatedMouseScroll>,
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut orbit: ResMut<OrbitCamera>,
-    mut query: Query<&mut Transform, With<Camera3d>>,
-) {
-    let Ok(mut transform) = query.single_mut() else { return };
-    let dt = time.delta_secs();
-
-    if mouse_buttons.pressed(MouseButton::Left) {
-        orbit.yaw -= mouse_motion.delta.x * ORBIT_SENSITIVITY;
-        orbit.pitch = (orbit.pitch - mouse_motion.delta.y * ORBIT_SENSITIVITY)
-            .clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    }
-    if keys.pressed(KeyCode::ArrowLeft) { orbit.yaw += 1.5 * dt; }
-    if keys.pressed(KeyCode::ArrowRight) { orbit.yaw -= 1.5 * dt; }
-    if keys.pressed(KeyCode::ArrowUp) {
-        orbit.pitch = (orbit.pitch + 1.0 * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    }
-    if keys.pressed(KeyCode::ArrowDown) {
-        orbit.pitch = (orbit.pitch - 1.0 * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    }
-
-    orbit.distance = (orbit.distance - mouse_scroll.delta.y * ZOOM_SENSITIVITY)
-        .clamp(MIN_DISTANCE, MAX_DISTANCE);
-
-    // Pan along the view's flattened (yaw-only) basis so WASD/QE re-centers
-    // the orbit target without also fighting the current pitch.
-    let yaw_rot = Quat::from_rotation_y(orbit.yaw);
-    let forward_flat = yaw_rot * Vec3::NEG_Z;
-    let right_flat = yaw_rot * Vec3::X;
-    let mut pan = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { pan += forward_flat; }
-    if keys.pressed(KeyCode::KeyS) { pan -= forward_flat; }
-    if keys.pressed(KeyCode::KeyA) { pan -= right_flat; }
-    if keys.pressed(KeyCode::KeyD) { pan += right_flat; }
-    if keys.pressed(KeyCode::KeyE) { pan += Vec3::Y; }
-    if keys.pressed(KeyCode::KeyQ) { pan -= Vec3::Y; }
-    let pan_speed = orbit.distance.max(1.0) * 0.5;
-    orbit.target += pan * pan_speed * dt;
-
-    let dir = Vec3::new(
-        orbit.pitch.cos() * orbit.yaw.sin(),
-        orbit.pitch.sin(),
-        orbit.pitch.cos() * orbit.yaw.cos(),
-    );
-    transform.translation = orbit.target + dir * orbit.distance;
-    transform.look_at(orbit.target, Vec3::Y);
-}
-
-// ---------------------------------------------------------------------------
 // decoder thread + main
 // ---------------------------------------------------------------------------
 
 /// Runs the UDP capture + decode loop on a background thread, sending each
 /// completed frame's points to the Bevy app over `viz_tx`. Bevy owns the
 /// main thread (required for windowing on some platforms).
-fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
+fn run_decoder(
+    config_path: String,
+    viz_tx: mpsc::Sender<Vec<VizPoint>>,
+    seg_params: Arc<Mutex<segmentation::SegParams>>,
+) {
     let text = match std::fs::read_to_string(&config_path) {
         Ok(t) => t,
         Err(e) => {
@@ -1106,7 +948,7 @@ fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
     let (tx, rx) = mpsc::channel::<RawPacket>();
     spawn_packet_source(&cfg, tx);
 
-    let mut decoder = RsHeliosDecoder::new(&cfg);
+    let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut frame_count = 0u64;
 
     println!("rslidar: waiting for DIFOP/MSOP packets...");
@@ -1114,21 +956,38 @@ fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
         match msg {
             RawPacket::Difop(buf) => decoder.decode_difop(&buf),
             RawPacket::Msop(buf) => {
-                for cloud in decoder.decode_msop(&buf) {
+                for (cloud, range_graph) in decoder.decode_msop(&buf) {
                     frame_count += 1;
-                    print_frame_stats(frame_count, &cloud);
+                    // print_frame_stats(frame_count, &cloud);
+
+                    // `RangeNode::point_idx` is the index a point had in
+                    // decode_msop's flat per-frame point buffer, which is the
+                    // exact same order `cloud.data` was serialized in -- so
+                    // this just inverts that mapping to go from a point's
+                    // position in `cloud.data` back to its final cluster id
+                    // (`beta`, written by second_segmentation). Defaults to -1
+                    // for points that never won a range-graph cell this
+                    // revolution (see RangeGraph::insert's "keep the closer
+                    // point" rule).
+                    let mut point_cluster = vec![-1i32; cloud.width as usize];
+                    for node in range_graph.nodes.iter() {
+                        if node.valid && node.point_idx >= 0 {
+                            point_cluster[node.point_idx as usize] = node.beta;
+                        }
+                    }
 
                     let viz_points: Vec<VizPoint> = cloud
                         .data
                         .chunks_exact(cloud.point_step as usize)
-                        .filter_map(|chunk| {
+                        .enumerate()
+                        .filter_map(|(i, chunk)| {
                             let x = f32::from_le_bytes(chunk[0..4].try_into().unwrap());
                             let y = f32::from_le_bytes(chunk[4..8].try_into().unwrap());
                             let z = f32::from_le_bytes(chunk[8..12].try_into().unwrap());
                             if x.is_nan() || y.is_nan() || z.is_nan() {
                                 None
                             } else {
-                                Some(VizPoint { x, y, z })
+                                Some(VizPoint { x, y, z, cluster: point_cluster[i] })
                             }
                         })
                         .collect();
@@ -1146,15 +1005,19 @@ fn run_decoder(config_path: String, viz_tx: mpsc::Sender<Vec<VizPoint>>) {
 fn main() {
     let config_path = std::env::args().nth(1).unwrap_or_else(default_config_path);
 
+    let seg_params = Arc::new(Mutex::new(segmentation::SegParams::default()));
+    let seg_params_for_decoder = seg_params.clone();
+
     let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
-    thread::spawn(move || run_decoder(config_path, viz_tx));
+    thread::spawn(move || run_decoder(config_path, viz_tx, seg_params_for_decoder));
 
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(PointsPlugin)
         .insert_resource(CloudChannel(Mutex::new(viz_rx)))
         .insert_resource(OrbitCamera::default())
+        .insert_resource(SegParamsHandle(seg_params))
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (drain_latest_cloud, orbit_camera, draw_origin_axes))
+        .add_systems(Update, (drain_latest_cloud, orbit_camera, draw_origin_axes, tune_seg_params))
         .run();
 }

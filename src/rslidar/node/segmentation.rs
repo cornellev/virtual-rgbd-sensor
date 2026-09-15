@@ -9,40 +9,27 @@ use std::collections::VecDeque;
 /// `visualization::tune_seg_params`).
 #[derive(Clone, Copy)]
 pub struct SegParams {
-    /// Dimensionless scale on the *expected* same-ring point spacing
-    /// (average range * azimuth gap in radians) that should_split compares
-    /// the actual gap against -- e.g. 1.5 means "split once the real gap
-    /// exceeds 1.5x what pure angular resolution alone would produce".
-    /// NOT a raw distance in meters (that was the pre-expected-distance
-    /// meaning of this field; old tuned values around 0.1 don't carry over
-    /// -- they'd make this almost never merge anything now).
+    // Toggled by the visualizer's Space key (see visualization::tune_seg_params).
+    // When false, the decode loop skips first_segmentation/second_segmentation
+    // entirely for that revolution, so every point renders unclustered (gray)
+    // -- lets you flip between decode-only and decode+segmentation timing/
+    // output live, without restarting.
+    pub seg_enabled: bool,
     pub th_d: f32,
-    /// first_segmentation's concavity-check angle threshold, degrees.
     pub th_z_deg: f32,
     pub th_d_second: f32,
     pub k_deg: f32,
     pub z_weight: f32,
     pub min_cluster_points: u32,
-    /// Does double duty:
-    /// 1. Absolute floor (meters) under both should_split's and
-    ///    cross_ring_threshold's thresholds. This exists for short range:
-    ///    both thresholds scale down toward zero as range shrinks (since
-    ///    they're built on `expected = range * angle_gap`), which can fall
-    ///    below the sensor's actual noise floor and make nearby points fail
-    ///    to merge almost at random.
-    /// 2. A dimensionless fraction in `node_dist`'s dz-gate (see its doc):
-    ///    `min_gap_m * z_weight * expected_gap` is the dz below which two
-    ///    cross-ring segments are treated as exactly coplanar (dz forced to
-    ///    0) rather than merely close -- e.g. 0.5 zeroes out any dz smaller
-    ///    than half the expected cross-ring spacing at that range/angle.
     pub min_gap_m: f32,
 }
 
 impl Default for SegParams {
     fn default() -> Self {
         Self {
-            th_d: 5.0, th_z_deg: 5.0, th_d_second: 0.5, k_deg: 1.0, z_weight: 1.0,
-            min_cluster_points: 10, min_gap_m: 0.5,
+            seg_enabled: true,
+            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.15, k_deg: 1.0, z_weight: 1.0,
+            min_cluster_points: 3, min_gap_m: 0.5,
         }
     }
 }
@@ -243,6 +230,7 @@ impl RangeGraph {
     /// `SegParams` for why the range-scaled threshold alone isn't enough.
     fn should_split(&mut self, idx_cur: usize, idx_pre: usize, ring: usize, th_d: f32, th_z: f32, min_gap_m: f32) -> bool {
         let dist = self.point_dist(idx_cur, idx_pre);
+        // these are vectors depicting orientation of surface between two suspected objects
         let (v1, v2) = match self.get_vecs(idx_cur, idx_pre, ring) {
             Some(vecs) => (vecs[0], vecs[1]),
             None => return false,
@@ -260,9 +248,11 @@ impl RangeGraph {
             self.nodes[idx_pre].azimuth_centideg,
         ) as f32 / 100.0).to_radians();
         let avg_range = (self.nodes[idx_cur].range + self.nodes[idx_pre].range) / 2.0;
-        let threshold = (th_d * avg_range * az_gap_rad).max(min_gap_m);
+        let threshold = (th_d * avg_range * az_gap_rad);
 
-        dist > threshold || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
+        // angle is to check whether two surfaces are facing away from each other, if yes, probably
+        // found 2 separate corners (not a flat surface), split into different categories
+        dist > th_d * avg_range / 0.3 || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
     }
 
     /// Labels same-ring segments (`RangeNode::alpha`) *and* builds
@@ -406,78 +396,23 @@ impl SetGraph {
         }
     }
 
-    /// Distance between two segments' mean positions. If the Z separation is
-    /// smaller than `dz_gate`, it's dropped entirely (treated as exactly
-    /// coplanar) rather than merely down-weighted -- `TwoLayerNode::nodeDist`
-    /// was XY-only (no z_mean existed at all) and this preserves that
-    /// behavior for small dz, while still letting a *real* vertical gap
-    /// (dz >= dz_gate) count fully and block the merge. Callers pass
-    /// `min_gap_m * z_weight * expected_gap(...)`, not a flat constant: the
-    /// dz two points on the same real surface should show grows with range
-    /// for a fixed angular gap (same arc-length logic `expected_gap` already
-    /// uses for the overall threshold), so the gate has to grow with range
-    /// too, or genuinely-coplanar points stop merging vertically
-    /// specifically as they get farther away.
-    fn node_dist(a: &GraphNode, b: &GraphNode, dz_gate: f32) -> f32 {
+    fn node_dist(a: &GraphNode, b: &GraphNode) -> f32 {
         let dx = a.x_mean - b.x_mean;
         let dy = a.y_mean - b.y_mean;
-        let mut dz = a.z_mean - b.z_mean;
-        if dz.abs() < dz_gate {
-            dz = 0.0;
-        }
-        if (a.range + b.range / 2.0) > 5.0 {
-            (dx * dx + dy * dy + dz * dz).sqrt() / (a.range + b.range / 2.0) 
-        } else {
-            (dx * dx + dy * dy + dz * dz).sqrt() 
-        }
+        (dx * dx + dy * dy).sqrt()
     }
 
-    /// Cross-ring merge threshold: `th_d_second`/`k_deg` are dimensionless
-    /// scale factors on the *expected* cross-ring point spacing (arc length =
-    /// average range * vertical-angle gap in radians), same idea as
-    /// `should_split`'s `th_d` -- `expected` already grows with the real
-    /// angular gap between the two rings (this LiDAR's vertical spacing is
-    /// far from uniform: ~0.5deg near the horizon, 2.5-3deg at the
-    /// extremes), so this replaces what used to be an ad hoc flat-plus-
-    /// per-degree-constant approximation with the actual trigonometry.
-    /// `th_d_second` is the base scale; `k_deg` adds a bit more scale per
-    /// degree of gap on top, in case the base scale alone doesn't widen
-    /// enough for the coarsest ring pairs.
-    /// Expected cross-ring point spacing for two segments if they lie on one
-    /// continuous, roughly-perpendicular-to-the-beam surface: arc length =
-    /// average range * vertical-angle gap (radians). This is the one place
-    /// range enters the cross-ring model -- both `cross_ring_threshold` and
-    /// `dvert` (node_dist's Z-tolerance) build on it, so both grow with
-    /// range together instead of only one of them doing so.
-    fn expected_gap(ri: usize, rn: usize, a: &GraphNode, b: &GraphNode, ring_vert_deg: &[f32; NUM_RINGS]) -> f32 {
-        let gap_rad = (ring_vert_deg[rn] - ring_vert_deg[ri]).abs().to_radians();
-        let avg_range = (a.range + b.range) / 2.0;
-        avg_range * gap_rad
+    /// Cross-ring merge threshold, shared by `get_neighbors`'s candidate
+    /// pre-filter and `second_segmentation`'s actual accept check -- these
+    /// used to be two independently hand-written copies of the same formula
+    /// that drifted apart (the pre-filter ended up ~10x stricter than the
+    /// accept check at typical ranges), silently dropping real candidates
+    /// before the looser accept check ever got a chance to judge them.
+    /// Sharing one function makes that kind of drift impossible.
+    fn cross_ring_threshold(th_d_second: f32, min_gap_m: f32, min_range: f32) -> f32 {
+        th_d_second * (min_range / 0.4).max(min_gap_m) * min_range.ln().max(1.0)
     }
 
-    fn cross_ring_threshold(
-        th_d_second: f32,
-        k_deg: f32,
-        min_gap_m: f32,
-        ri: usize,
-        rn: usize,
-        a: &GraphNode,
-        b: &GraphNode,
-        ring_vert_deg: &[f32; NUM_RINGS],
-    ) -> f32 {
-        let gap_deg = (ring_vert_deg[rn] - ring_vert_deg[ri]).abs();
-        let expected = Self::expected_gap(ri, rn, a, b, ring_vert_deg);
-        let scale = th_d_second + k_deg * gap_deg;
-        (expected * scale).max(min_gap_m)
-    }
-
-    /// Candidate segments in the rings directly above/below `(ri, ci)` that
-    /// are close enough to merge with it -- mirrors
-    /// `TwoLayerNode::getNeighbors`. `th_d`/`k_deg`/`z_weight` have to be
-    /// passed in (rather than read off `self`) since, unlike the C++
-    /// version, nothing here stores them as fields. Uses `node_dist` (not an
-    /// inline recomputation) so the candidate filter here and the actual
-    /// merge decision in `second_segmentation` can never disagree.
     fn get_neighbors(
         &self,
         ri: usize,
@@ -487,11 +422,12 @@ impl SetGraph {
         z_weight: f32,
         min_gap_m: f32,
         ring_vert_deg: &[f32; NUM_RINGS],
-    ) -> Vec<(usize, usize)> {
+    ) -> Vec<(usize, usize, &'static str)> {
         let mut nbrs = Vec::new();
         let cur = &self.nodes[ri][ci];
 
         for dr in [-1i32, 1i32] {
+            // vertical neighbors, above or below adjacent
             let rn = ri as i32 + dr;
             if rn < 0 || rn as usize >= NUM_RINGS {
                 continue;
@@ -502,36 +438,20 @@ impl SetGraph {
             // cross_ring_threshold's `expected`), not just the ring pair, so
             // this can't be hoisted out of the loop the way a flat threshold
             // could.
-            let try_push = |cn: usize, nbrs: &mut Vec<(usize, usize)>| {
+            let try_push = |cn: usize, nbrs: &mut Vec<(usize, usize, &'static str)>, adjc_type: &'static str| {
                 let cand = &self.nodes[rn][cn];
-                let threshold = Self::cross_ring_threshold(th_d_second, k_deg, min_gap_m, ri, rn, cur, cand, ring_vert_deg);
-                // `min_gap_m * z_weight` scales the same range-scaled
-                // expected_gap the overall threshold uses, not just the raw
-                // angular gap: the real Z separation between adjacent rings
-                // grows with range for a fixed angular gap (same arc-length
-                // logic as everywhere else here), so a gate that ignored
-                // range would stop zeroing out genuinely-coplanar dz once
-                // points get far enough away.
-                let dz_gate = min_gap_m * z_weight * Self::expected_gap(ri, rn, cur, cand, ring_vert_deg);
-                if Self::node_dist(cur, cand, dz_gate) < th_d_second {
-                    nbrs.push((rn, cn));
+                let dist = Self::node_dist(cur, cand);
+                let threshold = Self::cross_ring_threshold(th_d_second, min_gap_m, cur.range.min(cand.range));
+                if dist < threshold {
+                    nbrs.push((rn, cn, adjc_type));
                 }
             };
 
-            // Column spans must overlap ("connected", per the paper) for
-            // most candidates; rows are sorted by start_pos
-            // (first_segmentation's sort), so once a candidate starts past
-            // our end, every later one will too. But per Algorithm 2 / Figure 7, connected
-            // candidates aren't the whole story: also check the single
-            // nearest non-overlapping ("unconnected") candidate on each
-            // side, so a boundary that's off by one discretization step
-            // from a true continuation (plausible given real quantization/
-            // noise) still gets a chance to merge instead of being silently
-            // excluded just for missing the overlap by a hair.
             let mut last_before: Option<usize> = None;
             let mut first_after: Option<usize> = None;
 
             for cn in 0..self.nodes[rn].len() {
+                // iterating by column, so horizontally adjacent nodes
                 let cand = &self.nodes[rn][cn];
                 if cand.end_pos < cur.start_pos {
                     last_before = Some(cn);
@@ -541,13 +461,13 @@ impl SetGraph {
                     first_after = Some(cn);
                     break;
                 }
-                try_push(cn, &mut nbrs);
+                try_push(cn, &mut nbrs, "vertical");
             }
             if let Some(cn) = last_before {
-                try_push(cn, &mut nbrs);
+                try_push(cn, &mut nbrs, "horizontal");
             }
             if let Some(cn) = first_after {
-                try_push(cn, &mut nbrs);
+                try_push(cn, &mut nbrs, "horizontal");
             }
         }
         nbrs
@@ -589,21 +509,12 @@ impl SetGraph {
                 self.nodes[i][j].cluster = l_cnt;
 
                 while let Some((ri, ci)) = q.pop_front() {
-                    for (rn, cn) in self.get_neighbors(ri, ci, th_d_second, k_deg, z_weight, min_gap_m, ring_vert_deg) {
+                    for (rn, cn, adjc_type) in self.get_neighbors(ri, ci, th_d_second, k_deg, z_weight, min_gap_m, ring_vert_deg) {
                         if self.nodes[rn][cn].cluster != -1 {
                             continue;
                         }
-                        let dz_gate = min_gap_m * z_weight * Self::expected_gap(ri, rn, &self.nodes[ri][ci], &self.nodes[rn][cn], ring_vert_deg);
-                        let dist = Self::node_dist(&self.nodes[ri][ci], &self.nodes[rn][cn], dz_gate);
-                        let threshold = Self::cross_ring_threshold(
-                            th_d_second, k_deg, min_gap_m, ri, rn,
-                            &self.nodes[ri][ci], &self.nodes[rn][cn],
-                            ring_vert_deg,
-                        );
-                        if dist < th_d_second {
-                            self.nodes[rn][cn].cluster = l_cnt;
-                            q.push_back((rn, cn));
-                        }
+                        self.nodes[rn][cn].cluster = l_cnt;
+                        q.push_back((rn, cn));
                     }
                 }
             }

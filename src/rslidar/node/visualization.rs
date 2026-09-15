@@ -243,8 +243,12 @@ pub struct SegParamsHandle(pub Arc<Mutex<SegParams>>);
 /// (the absolute floor under both thresholds, so close-range comparisons
 /// don't get a smaller window than the sensor's actual noise floor -- it
 /// also doubles as the fraction used in node_dist's dz-gate, see its doc).
-/// Each tap is one step (not held-repeat), so nudging is deliberate rather
-/// than racing past the value you wanted.
+/// Space toggles `seg_enabled` -- when off, the decode loop skips
+/// first_segmentation/second_segmentation entirely, so the printed
+/// per-revolution ms and the point coloring both flip live, letting you
+/// compare decode-only vs. decode+segmentation without restarting. Each tap
+/// is one step (not held-repeat), so nudging is deliberate rather than
+/// racing past the value you wanted.
 pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHandle>) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;
@@ -313,13 +317,17 @@ pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHan
         params.min_gap_m += MIN_GAP_STEP;
         changed = true;
     }
+    if keys.just_pressed(KeyCode::Space) {
+        params.seg_enabled = !params.seg_enabled;
+        changed = true;
+    }
     if changed {
         println!(
-            "rslidar: th_d={:.3}m th_z={:.2}deg th_d_second={:.3}m k_deg={:.3} z_weight={:.3} \
+            "rslidar: seg_enabled={} th_d={:.3}m th_z={:.2}deg th_d_second={:.3}m k_deg={:.3} z_weight={:.3} \
              min_cluster_points={} min_gap_m={:.3}  \
-             ('[' ']' th_d, ';' ''' th_z, '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, \
+             (Space seg_enabled, '[' ']' th_d, ';' ''' th_z, '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, \
              '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
-            params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
+            params.seg_enabled, params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
             params.min_cluster_points, params.min_gap_m
         );
     }
