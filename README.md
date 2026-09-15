@@ -16,7 +16,7 @@ Docker needs to be able to access IP addresses.
 
 Run the Rust ```rslidar_sdk``` with
 ```bash
- RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin rslidar_viz
+RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin rslidar_viz --release
 ```
 
 x11 host on Docker so I can GUI
