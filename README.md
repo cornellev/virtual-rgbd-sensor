@@ -1,18 +1,18 @@
 # Virtual RGBD Sensor
 
-## Table of Contents
-- [Features](#features)
-- [Recent Updates](#recent-updates)
-- [Instructions](#instructions)
-- [Debugging Notes](#debugging-notes)
+## Table of Contents 
+1) [Features](#features)
+2) [Recent Updates](#recent-updates)
+3) [Instructions](#instructions)
+4) [Debugging Notes](#debugging-notes)
 
 ## Features:
 1) Converted 32-channel RoboSense LiDAR outputs in the form of .pcap or MSOP/DIFOP packets to PointCloud2: ```(x, y, z, intensity, cluster_id)```.
 2) Implemented [Two-Layer-Graph Clustering](https://www.mdpi.com/2076-3417/10/23/8534) for 32-channel point cloud segmentation, per frame and without cross-frame matching and consistency.
 ![segmentation_demo](/demos/segmentation.png)
-<video width="320" height="240" controls>
+<!-- <video width="320" height="240" controls>
   <source src="/demos/yay.mp4" type="video/mp4">
-</video>
+</video> -->
 
 3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust.
 ![costmap_demo](/demos/occupancy_grid.png)
@@ -26,11 +26,17 @@
 | 9/8/26   | - Rewrote cpp ```rslidar_sdk``` with ```RSHeliosDecoder``` for RoboSense 32-channel LiDAR specifically. This is for converting offline .pcap or online MSOP/DIFOP packets to point clouds | 
 
 ## Instructions:
-### For Offline Demo:
-Run the Rust ```rslidar_sdk_node``` with
+Run:
 ```bash
 RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin rslidar_viz --release
 ```
+
+### For Offline Demo:
+To run the point cloud conversion and segmentation on the provided offline LiDAR packets, make sure that ```pcap_path``` in ```config.yaml``` is set to whatever file path points to ```test_cloud.pcap```. 
+
+### For Online Demo:
+If you want to run ```rslidar_sdk_node``` on online LiDAR via MSOP/DIFOP ports, make sure the ```pcap_path``` in ```config.yaml``` is empty.
+
 
 ## Debugging Notes:
 Our LiDAR is pinged via 192.168.1.102:
@@ -39,7 +45,7 @@ sudo ip link set enP8p1s0 up
 sudo ip addr ad 192.168.1.102/24 dev enP8p1s0
 ```
 
-Docker needs to be able to access IP addresses.
+If working in a Docker container, it needs to be able to access IP addresses.
 
 x11 host on Docker so I can GUI
 on local:
@@ -67,7 +73,3 @@ in docker
 rviz2
 ```
 should actually display
-
-
-
-

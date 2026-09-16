@@ -609,7 +609,7 @@ impl RsHeliosDecoder {
                 let mut finished_graph =
                     std::mem::replace(&mut self.range_graph, segmentation::RangeGraph::new());
                 if !self.points.is_empty() {
-                    let iter_start = Instant::now();
+                    // let iter_start = Instant::now();
 
                     let (seg_enabled, th_d, th_z_deg, th_d_second, k_deg, z_weight, min_cluster_points, min_gap_m) = {
                         let p = self.seg_params.lock().unwrap();
@@ -625,11 +625,11 @@ impl RsHeliosDecoder {
 
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
 
-                    println!(
-                        "rslidar: {:.3}ms{}",
-                        iter_start.elapsed().as_secs_f64() * 1000.0,
-                        if seg_enabled { "" } else { " (segmentation off, press Space to toggle)" },
-                    );
+                    // println!(
+                    //     "rslidar: {:.3}ms{}",
+                    //     iter_start.elapsed().as_secs_f64() * 1000.0,
+                    //     if seg_enabled { "" } else { " (segmentation off, press Space to toggle)" },
+                    // );
 
                     out.push((cloud, finished_graph));
                 }
