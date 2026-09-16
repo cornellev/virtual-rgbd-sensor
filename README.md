@@ -1,4 +1,5 @@
 # Virtual RGBD Sensor
+In Rust!
 
 ## Table of Contents 
 1) [Features](#features)
@@ -8,13 +9,13 @@
 
 ## Features:
 1) Converted 32-channel RoboSense LiDAR outputs in the form of .pcap or MSOP/DIFOP packets to PointCloud2: ```(x, y, z, intensity, cluster_id)```.
-2) Implemented [Two-Layer-Graph Clustering](https://www.mdpi.com/2076-3417/10/23/8534) for 32-channel point cloud segmentation, per frame and without cross-frame matching and consistency.
+2) Implemented [Two-Layer-Graph Clustering](https://www.mdpi.com/2076-3417/10/23/8534) for 32-channel point cloud segmentation, per frame and without cross-frame matching and consistency. Implementation explanation is [here](src/rslidar/2-LAYER.pdf).
 ![segmentation_demo](/demos/segmentation.png)
 <!-- <video width="320" height="240" controls>
   <source src="/demos/yay.mp4" type="video/mp4">
 </video> -->
 
-3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust.
+3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust. Implementation explanation is [here](src/rslidar/lidar.pdf).
 ![costmap_demo](/demos/occupancy_grid.png)
 
 ## Recent Updates:
@@ -72,4 +73,4 @@ in docker
 ```bash
 rviz2
 ```
-should actually display
+should actually display.
