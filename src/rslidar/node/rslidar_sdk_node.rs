@@ -577,6 +577,14 @@ impl RsHeliosDecoder {
         };
         let pkt_ts = pkt_ts_us * 1e-6;
 
+        // Read once per packet (not per point/channel) to avoid locking the
+        // mutex 12*32 times over -- these only need to be about as fresh as
+        // the other seg_params read once per revolution below.
+        let (height_filter_enabled, min_height) = {
+            let p = self.seg_params.lock().unwrap();
+            (p.height_filter_enabled, p.min_height)
+        };
+
         let mut azimuths = [0i32; BLOCKS_PER_PKT];
         for blk in 0..BLOCKS_PER_PKT {
             let base = MSOP_HEADER_LEN + blk * MSOP_BLOCK_LEN;
@@ -648,10 +656,16 @@ impl RsHeliosDecoder {
                 let angle_vert = self.chan_angles.vert[chan];
                 let angle_horiz_final = angle_horiz + self.chan_angles.horiz[chan];
                 let distance = dist_raw as f32 * DISTANCE_RES;
+                // Computed before the filter check (not just inside it, like
+                // x/y) since z alone -- not x or y -- is what the height
+                // filter below needs to decide inclusion.
+                let z = distance * sin_centideg(angle_vert) + RZ;
 
-                if self.distance_section.contains(distance) && self.scan_section.contains(angle_horiz_final) {
+                if self.distance_section.contains(distance)
+                    && self.scan_section.contains(angle_horiz_final)
+                    && (!height_filter_enabled || z >= min_height)
+                {
                     let cv = cos_centideg(angle_vert);
-                    let sv = sin_centideg(angle_vert);
                     let ch = cos_centideg(angle_horiz_final);
                     let sh = sin_centideg(angle_horiz_final);
                     let ch0 = cos_centideg(angle_horiz);
@@ -659,7 +673,6 @@ impl RsHeliosDecoder {
 
                     let x = distance * cv * ch + RX * ch0;
                     let y = -distance * cv * sh - RX * sh0;
-                    let z = distance * sv + RZ;
 
                     // `chan` is the raw hardware channel, correct for
                     // indexing `chan_angles.vert`/`.horiz` (calibration is

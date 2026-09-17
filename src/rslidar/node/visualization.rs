@@ -246,9 +246,13 @@ pub struct SegParamsHandle(pub Arc<Mutex<SegParams>>);
 /// Space toggles `seg_enabled` -- when off, the decode loop skips
 /// first_segmentation/second_segmentation entirely, so the printed
 /// per-revolution ms and the point coloring both flip live, letting you
-/// compare decode-only vs. decode+segmentation without restarting. Each tap
-/// is one step (not held-repeat), so nudging is deliberate rather than
-/// racing past the value you wanted.
+/// compare decode-only vs. decode+segmentation without restarting. 'h'
+/// toggles `height_filter_enabled` (drops points below `min_height`, in
+/// both the rendered cloud and segmentation, before either ever sees them);
+/// 'j'/'k' step `min_height` down/up (vim-style: j lowers the cutoff, k
+/// raises it) while the filter is on or off, so it's already dialed in by
+/// the time you flip 'h'. Each tap is one step (not held-repeat), so nudging
+/// is deliberate rather than racing past the value you wanted.
 pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHandle>) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;
@@ -257,6 +261,7 @@ pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHan
     const Z_WEIGHT_STEP: f32 = 0.05;
     const MIN_CLUSTER_STEP: u32 = 1;
     const MIN_GAP_STEP: f32 = 0.01;
+    const MIN_HEIGHT_STEP: f32 = 0.05;
 
     let mut params = handle.0.lock().unwrap();
     let mut changed = false;
@@ -321,13 +326,26 @@ pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHan
         params.seg_enabled = !params.seg_enabled;
         changed = true;
     }
+    if keys.just_pressed(KeyCode::KeyH) {
+        params.height_filter_enabled = !params.height_filter_enabled;
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::KeyJ) {
+        params.min_height -= MIN_HEIGHT_STEP;
+        changed = true;
+    }
+    if keys.just_pressed(KeyCode::KeyK) {
+        params.min_height += MIN_HEIGHT_STEP;
+        changed = true;
+    }
     if changed {
         println!(
-            "rslidar: seg_enabled={} th_d={:.3}m th_z={:.2}deg th_d_second={:.3}m k_deg={:.3} z_weight={:.3} \
-             min_cluster_points={} min_gap_m={:.3}  \
-             (Space seg_enabled, '[' ']' th_d, ';' ''' th_z, '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, \
-             '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
-            params.seg_enabled, params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
+            "rslidar: seg_enabled={} height_filter_enabled={} min_height={:.2}m th_d={:.3}m th_z={:.2}deg \
+             th_d_second={:.3}m k_deg={:.3} z_weight={:.3} min_cluster_points={} min_gap_m={:.3}  \
+             (Space seg_enabled, 'h' height_filter_enabled, 'j' 'k' min_height, '[' ']' th_d, ';' ''' th_z, \
+             '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
+            params.seg_enabled, params.height_filter_enabled, params.min_height,
+            params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
             params.min_cluster_points, params.min_gap_m
         );
     }

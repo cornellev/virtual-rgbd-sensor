@@ -9,12 +9,9 @@ use std::collections::VecDeque;
 /// `visualization::tune_seg_params`).
 #[derive(Clone, Copy)]
 pub struct SegParams {
-    // Toggled by the visualizer's Space key (see visualization::tune_seg_params).
-    // When false, the decode loop skips first_segmentation/second_segmentation
-    // entirely for that revolution, so every point renders unclustered (gray)
-    // -- lets you flip between decode-only and decode+segmentation timing/
-    // output live, without restarting.
     pub seg_enabled: bool,
+    pub height_filter_enabled: bool,
+    pub min_height: f32,
     pub th_d: f32,
     pub th_z_deg: f32,
     pub th_d_second: f32,
@@ -28,8 +25,10 @@ impl Default for SegParams {
     fn default() -> Self {
         Self {
             seg_enabled: true,
-            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.15, k_deg: 1.0, z_weight: 1.0,
-            min_cluster_points: 3, min_gap_m: 0.5,
+            height_filter_enabled: false,
+            min_height: -0.3,
+            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.1, k_deg: 1.0, z_weight: 1.0,
+            min_cluster_points: 3, min_gap_m: 1.0,
         }
     }
 }

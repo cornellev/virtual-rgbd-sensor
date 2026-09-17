@@ -34,7 +34,7 @@ lidar:
                                    #  When msg_source is 3, the following parameters will be used
       pcap_repeat: true            #  true: The pcap bag will repeat play
       pcap_rate: 1.0               #  Rate to read the pcap file
-      pcap_path: /home/dev/ws/src/dynamic-box/my_rosbag_reader/my_rosbag_reader/test_cloud.pcap #The path of pcap file
+      pcap_path: /home/xtsang/virtual-rgbd-sensor/test_cloud.pcap #The path of pcap file
 
     ros: #THIS IS SHOULD NOT BE NECESSARY
       ros_frame_id: rslidar                           #Frame id of packet message and point cloud message
