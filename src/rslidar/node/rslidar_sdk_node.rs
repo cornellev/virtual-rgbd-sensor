@@ -3,14 +3,14 @@
 #![allow(dead_code)]
 
 mod segmentation;
-mod visualization;
-use visualization::{
-    draw_origin_axes, drain_latest_cloud, orbit_camera, setup_scene, tune_seg_params, CloudChannel,
-    OrbitCamera, SegParamsHandle, VizPoint,
+
+use zenoh::{
+    Wait,
+    pubsub::Publisher,
+    qos::CongestionControl
 };
 
-use bevy::prelude::*;
-use bevy_points::prelude::PointsPlugin;
+use anyhow::Result;
 
 use pcap_file::pcap::PcapReader;
 
@@ -56,6 +56,46 @@ const FIRING_TSS_US: [f64; 32] = [
     24.22, 25.95, 27.68, 29.41, 31.14, 32.87, 34.6, 36.33, 38.06, 39.79, 41.52, 43.25, 44.98,
     46.71, 48.44, 50.17, 51.9, 53.63,
 ];
+
+// zenoh stuff
+fn publisher<'a>(session: &'a zenoh::Session, key: &'static str) -> Result<Publisher<'a>> {
+    session
+        .declare_publisher(key)
+        .congestion_control(CongestionControl::Drop)
+        .wait()
+        .map_err(|error| anyhow::anyhow!("declare {key} publisher: {error}"))
+}
+
+/// Wire format published on both point-cloud keys: a 16-byte header
+/// (stamp_sec: i32, stamp_nanosec: u32, width: u32, point_step: u32, all
+/// little-endian) followed by `width * point_step` bytes of point data.
+/// `frame_id` isn't included since it's constant per key/session, not
+/// per-frame.
+fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
+    let width = data.len() as u32 / point_step;
+    let mut buf = Vec::with_capacity(16 + data.len());
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
+    buf.extend_from_slice(&width.to_le_bytes());
+    buf.extend_from_slice(&point_step.to_le_bytes());
+    buf.extend_from_slice(data);
+    buf
+}
+
+const SEG_POINT_STEP: u32 = 20; // x, y, z, intensity (f32) + cluster_id (i32)
+
+/// `cloud_data`'s XYZI points (see `POINT_STEP`) with each point's cluster id
+/// from `point_cluster` appended as a trailing little-endian i32 (-1 for
+/// points that never won a range-graph cell this revolution).
+fn build_segmented_data(cloud_data: &[u8], point_cluster: &[i32]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(cloud_data.len() + point_cluster.len() * 4);
+    for (chunk, &cluster) in cloud_data.chunks_exact(POINT_STEP as usize).zip(point_cluster) {
+        data.extend_from_slice(chunk);
+        data.extend_from_slice(&cluster.to_le_bytes());
+    }
+    data
+}
+//
 
 fn chan_tss() -> [f64; 32] {
     let mut out = [0.0f64; 32];
@@ -116,6 +156,8 @@ fn azimuth_round(v: i32) -> i32 {
 /// Finds a `<key>: <value>` line anywhere in the file and returns the value
 /// with any trailing `# comment` stripped. Good enough for config.yaml's flat
 /// key layout; this is not a general YAML parser.
+/// also like if "pcap_path" is empty, default to online LiDAR, if that exist
+/// if "pcap_path" contains a valid path, default to the offline LiDAR
 fn find_scalar(text: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     for line in text.lines() {
@@ -455,15 +497,7 @@ struct RsHeliosDecoder {
     points: Vec<Point>,
     range_graph: segmentation::RangeGraph,
     set_graph: segmentation::SetGraph,
-    // Real vertical angle (degrees) of each ring, indexed in the same
-    // user_chan-sorted order the range graph uses -- lets second_segmentation
-    // scale its cross-ring merge threshold by how far apart two rings
-    // actually are in elevation, instead of one flat constant for every pair.
     ring_vert_deg: [f32; LASER_NUM],
-    // Live-tunable via the visualizer's keyboard controls (see
-    // visualization::tune_seg_params) -- read fresh each revolution instead
-    // of being a fixed literal, so a value changed there shows up here
-    // within about one revolution.
     seg_params: Arc<Mutex<segmentation::SegParams>>,
     first_point_ts: f64,
     prev_point_ts: f64,
@@ -633,12 +667,6 @@ impl RsHeliosDecoder {
 
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
 
-                    // println!(
-                    //     "rslidar: {:.3}ms{}",
-                    //     iter_start.elapsed().as_secs_f64() * 1000.0,
-                    //     if seg_enabled { "" } else { " (segmentation off, press Space to toggle)" },
-                    // );
-
                     out.push((cloud, finished_graph));
                 }
                 self.points.clear();
@@ -674,20 +702,6 @@ impl RsHeliosDecoder {
                     let x = distance * cv * ch + RX * ch0;
                     let y = -distance * cv * sh - RX * sh0;
 
-                    // `chan` is the raw hardware channel, correct for
-                    // indexing `chan_angles.vert`/`.horiz` (calibration is
-                    // keyed by physical channel) -- but the *firing order* of
-                    // channels on this LiDAR is not sorted by vertical angle
-                    // (confirmed: chan_angles.vert in raw order is a scramble
-                    // of the real angle set, not monotonic). get_neighbors
-                    // assumes ring i and ring i+1 are vertically adjacent, so
-                    // the range graph's ring must be the angular rank
-                    // (user_chan), not the firing-order index -- using `chan`
-                    // directly here made "adjacent ring" mean "adjacent in
-                    // firing sequence", which is nearly unrelated to true
-                    // vertical adjacency and explains why physically-adjacent
-                    // points from the same instant were landing in unrelated
-                    // rings and never getting compared/merged at all.
                     let ring = self.chan_angles.user_chan[chan] as usize;
                     let point_idx = self.points.len() as i32;
                     self.range_graph.insert(
@@ -927,14 +941,10 @@ fn default_config_path() -> String {
 // decoder thread + main
 // ---------------------------------------------------------------------------
 
-/// Runs the UDP capture + decode loop on a background thread, sending each
-/// completed frame's points to the Bevy app over `viz_tx`. Bevy owns the
-/// main thread (required for windowing on some platforms).
-fn run_decoder(
-    config_path: String,
-    viz_tx: mpsc::Sender<Vec<VizPoint>>,
-    seg_params: Arc<Mutex<segmentation::SegParams>>,
-) {
+/// Runs the UDP capture + decode loop, publishing each completed frame (raw
+/// and segmented) over zenoh. Headless -- visualization lives in a separate
+/// process (zenoh_test.rs) that subscribes to these keys.
+fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParams>>) {
     let text = match std::fs::read_to_string(&config_path) {
         Ok(t) => t,
         Err(e) => {
@@ -961,6 +971,21 @@ fn run_decoder(
     let (tx, rx) = mpsc::channel::<RawPacket>();
     spawn_packet_source(&cfg, tx);
 
+    let session = zenoh::open(zenoh::Config::default())
+        .wait()
+        .unwrap_or_else(|error| {
+            eprintln!("rslidar: failed to open zenoh session: {error}");
+            std::process::exit(1)
+        });
+    let pub_raw = publisher(&session, "rslidar/points/raw").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+    let pub_seg = publisher(&session, "rslidar/points/segmented").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut frame_count = 0u64;
 
@@ -971,7 +996,6 @@ fn run_decoder(
             RawPacket::Msop(buf) => {
                 for (cloud, range_graph) in decoder.decode_msop(&buf) {
                     frame_count += 1;
-                    // print_frame_stats(frame_count, &cloud);
 
                     // `RangeNode::point_idx` is the index a point had in
                     // decode_msop's flat per-frame point buffer, which is the
@@ -989,26 +1013,18 @@ fn run_decoder(
                         }
                     }
 
-                    let viz_points: Vec<VizPoint> = cloud
-                        .data
-                        .chunks_exact(cloud.point_step as usize)
-                        .enumerate()
-                        .filter_map(|(i, chunk)| {
-                            let x = f32::from_le_bytes(chunk[0..4].try_into().unwrap());
-                            let y = f32::from_le_bytes(chunk[4..8].try_into().unwrap());
-                            let z = f32::from_le_bytes(chunk[8..12].try_into().unwrap());
-                            if x.is_nan() || y.is_nan() || z.is_nan() {
-                                None
-                            } else {
-                                Some(VizPoint { x, y, z, cluster: point_cluster[i] })
-                            }
-                        })
-                        .collect();
-
-                    // Ignore send errors: they just mean the Bevy window
-                    // closed, at which point the decoder keeps running
-                    // harmlessly until the process exits.
-                    let _ = viz_tx.send(viz_points);
+                    if let Err(error) = pub_raw
+                        .put(encode_points(&cloud.header, cloud.point_step, &cloud.data))
+                        .wait() {
+                        eprintln!("rslidar: publish raw cloud: {error}");
+                    }
+                    let seg_data = build_segmented_data(&cloud.data, &point_cluster);
+                    if let Err(error) = pub_seg
+                        .put(encode_points(&cloud.header, SEG_POINT_STEP, &seg_data))
+                        .wait() {
+                        eprintln!("rslidar: publish segmented cloud: {error}");
+                    }
+                    println!("output")
                 }
             }
         }
@@ -1017,20 +1033,6 @@ fn run_decoder(
 
 fn main() {
     let config_path = std::env::args().nth(1).unwrap_or_else(default_config_path);
-
     let seg_params = Arc::new(Mutex::new(segmentation::SegParams::default()));
-    let seg_params_for_decoder = seg_params.clone();
-
-    let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
-    thread::spawn(move || run_decoder(config_path, viz_tx, seg_params_for_decoder));
-
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(PointsPlugin)
-        .insert_resource(CloudChannel(Mutex::new(viz_rx)))
-        .insert_resource(OrbitCamera::default())
-        .insert_resource(SegParamsHandle(seg_params))
-        .add_systems(Startup, setup_scene)
-        .add_systems(Update, (drain_latest_cloud, orbit_camera, draw_origin_axes, tune_seg_params))
-        .run();
+    run_decoder(config_path, seg_params);
 }
