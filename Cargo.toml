@@ -7,7 +7,14 @@ edition = "2024"
 name = "rslidar_viz"
 path = "src/rslidar/node/rslidar_sdk_node.rs"
 
+[[bin]]
+name = "zenoh_viz"
+path = "src/rslidar/node/zenoh_test.rs"
+
 [dependencies]
+anyhow = "1"
 bevy = "0.16"
 bevy_points = "0.8"
 pcap-file = "2"
+nalgebra = "*"
+zenoh = { version = "1.10", features = ["shared-memory", "unstable"] }

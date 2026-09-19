@@ -27,9 +27,14 @@ In Rust!
 | 9/8/26   | - Rewrote cpp ```rslidar_sdk``` with ```RSHeliosDecoder``` for RoboSense 32-channel LiDAR specifically. This is for converting offline .pcap or online MSOP/DIFOP packets to point clouds | 
 
 ## Instructions:
-Run:
+Run Zenoh publisher:
 ```bash
 RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin rslidar_viz --release
+```
+
+Run Zenoh subscriber:
+```bash
+RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin zenoh_viz --release
 ```
 
 ### For Offline Demo:
@@ -37,6 +42,7 @@ To run the point cloud conversion and segmentation on the provided offline LiDAR
 
 ### For Online Demo:
 If you want to run ```rslidar_sdk_node``` on online LiDAR via MSOP/DIFOP ports, make sure the ```pcap_path``` in ```config.yaml``` is empty.
+
 
 
 ## Debugging Notes:
