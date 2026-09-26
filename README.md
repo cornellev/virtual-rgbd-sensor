@@ -15,14 +15,15 @@ In Rust!
   <source src="/demos/yay.mp4" type="video/mp4">
 </video> -->
 
-3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust.
+3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust. Implementation details are contained [here](/src/rslidar/costmap).
 ![costmap_demo](/demos/occupancy_grid.png)
 
 ## Recent Updates:
 
 |  Date     | Changelog / Update Notes |
 |:----------|:-----------|
-| 9/14/25  | - Integrated Two-Layer-Graph Clustering with the decoding of MSOP/DIFOP packets for optimized segmentation while point cloud are being processed. Specifically during the construction of the range and set graphs. |
+| 9/26/26  | - Rewrote [ros2-planning costmap_2d](https://github.com/ros-planning/navigation/tree/noetic-devel/costmap_2d/src) implementation in Rust, also integrated costmap construction directly after `RangeGraph` initialization |
+| 9/14/26  | - Integrated Two-Layer-Graph Clustering with the decoding of MSOP/DIFOP packets for optimized segmentation while point cloud are being processed. Specifically during the construction of the range and set graphs. |
 | 9/12/26   | - Tested ```rslidar_sdk_node.rs``` on online LiDAR and offline .pcap files. Also integrated simple Bevy visualizer for point clouds. | 
 | 9/8/26   | - Rewrote cpp ```rslidar_sdk``` with ```RSHeliosDecoder``` for RoboSense 32-channel LiDAR specifically. This is for converting offline .pcap or online MSOP/DIFOP packets to point clouds | 
 
@@ -44,6 +45,15 @@ To run the point cloud conversion and segmentation on the provided offline LiDAR
 If you want to run ```rslidar_sdk_node``` on online LiDAR via MSOP/DIFOP ports, make sure the ```pcap_path``` in ```config.yaml``` is empty.
 
 
+## Zenoh Mappings
+A brief overview on the Zenoh pub/sub elements in ```virtual-rgbd-sensor```:
+### Publishers:
+1) ```rslidar/points/raw```: raw ```(x, y, z, intensity)``` point cloud from RoboSense LiDAR MSOP/DIFOP packets
+2) ```rslidar/points/segmented```: segmented ```(x, y, z, cluster_id)``` point cloud from ```segmentation.rs```'s two-layer-graph clustering
+3) ```rslidar/costmap```: occupancy grid containing free space, obstacle regions, and inflation layers from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
+
+### Subscribers:
+In ```zenoh_test.rs```, there are example point cloud and costmap subscribers in ```_points_subscriber``` and ```_costmap_subscriber```, respectively.
 
 ## Debugging Notes:
 Our LiDAR is pinged via 192.168.1.102:
