@@ -1,9 +1,5 @@
-// Bevy visualizer: renders the point clouds `run_decoder` (in the parent
-// module) produces. Nothing in here knows about MSOP/DIFOP, UDP, or pcap --
-// it only consumes `VizPoint`s handed over the `CloudChannel`. The one
-// exception is `SegParamsHandle`/`tune_seg_params`: those touch
-// `segmentation::SegParams` so the thresholds can be dialed in live from the
-// keyboard while watching the cluster coloring update.
+// like the lightweight bevy visualizer for lidar related outputs, expected that
+// these outputs will eventually be visualized in the sim and autonomy dash
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -19,11 +15,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// A single decoded point, stripped of everything ROS-specific -- just
-/// enough to hand off to Bevy for rendering. `cluster` is the segmentation
-/// output (`RangeNode::beta` from segmentation.rs's second_segmentation) --
-/// `-1` means the point never ended up representing any range-graph cell
-/// this revolution (see the note on `drain_latest_cloud`'s coloring below).
+/// one clustered point from the point cloud
 #[derive(Clone, Copy)]
 pub struct VizPoint {
     pub x: f32,
@@ -60,9 +52,6 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
         MeshMaterial3d(materials.add(PointsMaterial {
             settings: PointsShaderSettings {
                 point_size: 0.01,
-                // White so it doesn't tint the per-vertex distance colors
-                // `drain_latest_cloud` assigns (the shader multiplies this
-                // uniform color by each point's vertex color).
                 color: Color::WHITE.into(),
                 ..default()
             },
@@ -72,9 +61,6 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
         })),
         PointCloudEntity,
     ));
-
-    // The costmap plane is spawned by `drain_latest_costmap` once the first
-    // costmap arrives, since its size comes from the costmap header.
 }
 
 /// One costmap as published on `rslidar/costmap` (see `encode_costmap` in
@@ -246,23 +232,11 @@ pub fn drain_latest_cloud(
     let Some(cloud) = latest else { return };
     let Ok(mut mesh3d) = query.single_mut() else { return };
 
-    // The decoder emits points in the LiDAR/ROS convention (REP-103:
-    // x-forward, y-left, z-up), but Bevy is Y-up (+Y up, -Z forward). Passing
-    // (x, y, z) straight through renders LiDAR-up as depth, which looks like
-    // the whole cloud is tipped onto its side. Remap axes instead: Bevy's Y
-    // becomes LiDAR's z (up stays up), and Bevy's Z becomes -LiDAR's y (a
-    // proper rotation, not a mirror, so left/right stay consistent).
+    // LiDAR frame is REP-103: (x-forward, y-left, z-up), 
+    // Bevy frame is: Y-up (+Y up, -Z forward)
+    // need to transform points from LiDAR to Bevy or else lopsided
     let vertices: Vec<Vec3> = cloud.iter().map(|p| Vec3::new(p.x, p.z, -p.y)).collect();
 
-    // Golden-angle hue spread: successive cluster ids land ~137.5deg apart
-    // in hue, which (unlike e.g. `id * 30`) never lines up into a short
-    // repeating cycle of similar colors even for many clusters, so adjacent
-    // cluster ids still read as visually distinct. Points with no cluster
-    // (-1) -- e.g. one of two points that landed in the same range-graph
-    // cell this revolution, since RangeGraph::insert keeps only the closer
-    // one, so the loser never entered the segmentation pipeline at all --
-    // are colored a flat gray instead of a hue, so "unclustered" is visually
-    // unambiguous rather than landing on some arbitrary hue by coincidence.
     const GOLDEN_ANGLE_DEG: f32 = 137.507_76;
     let colors: Vec<Color> = cloud
         .iter()
@@ -310,10 +284,6 @@ const MIN_DISTANCE: f32 = 0.5;
 const MAX_DISTANCE: f32 = 500.0;
 const PITCH_LIMIT: f32 = 1.5; // radians; just short of straight up/down to avoid a gimbal flip
 
-/// Orbits the camera around `OrbitCamera::target` (the LiDAR origin by
-/// default): left-drag (or the arrow keys) rotates around it, the scroll
-/// wheel zooms, and WASD/QE re-center the target so you're not stuck
-/// orbiting one fixed point forever.
 pub fn orbit_camera(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
@@ -375,6 +345,7 @@ pub fn orbit_camera(
 #[derive(Resource, Clone)]
 pub struct SegParamsHandle(pub Arc<Mutex<SegParams>>);
 
+// this is like the scary parameter tuning stuff, delete later, very ew
 pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHandle>) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;

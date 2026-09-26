@@ -3,10 +3,13 @@
 #![allow(dead_code)]
 
 mod segmentation;
-mod costmap_math;
-mod costmap_2d;
-mod obstacle_layer;
-mod inflation_layer;
+
+#[path = "../costmap/mod.rs"]
+mod costmap;
+use costmap::costmap_math;
+use costmap::costmap_2d;
+use costmap::obstacle_layer;
+use costmap::inflation_layer;
 
 use zenoh::{
     Wait,
