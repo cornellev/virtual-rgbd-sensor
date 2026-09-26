@@ -98,24 +98,27 @@ pub struct CostmapPlane {
 /// ground points instead.
 const COSTMAP_PLANE_Y: f32 = -0.05;
 
-/// sRGB RGBA for each cost value: free is fully transparent so the point
-/// cloud stays readable, the inflation falloff (1..=252) fades blue -> yellow,
-/// inscribed (253) is orange, lethal (254) solid red, unknown (255) faint gray.
+/// Overall opacity of the costmap plane, like RViz's Map display "Alpha"
+/// (0.7 by default).
+const COSTMAP_ALPHA: u8 = 179;
+
+/// sRGB RGBA for each cost value, matching RViz's "costmap" color scheme as
+/// it shows a Nav2 costmap: free is transparent, the inflation falloff
+/// (1..=252) runs blue -> red, inscribed (253) is cyan, lethal (254) magenta,
+/// and unknown (255) the gray-green RViz uses for -1.
 fn costmap_colors() -> [[u8; 4]; 256] {
     let mut lut = [[0u8; 4]; 256];
     for cost in 1..=252usize {
-        let t = cost as f32 / 252.0;
-        lut[cost] = [
-            (255.0 * t) as u8,
-            (90.0 + 130.0 * t) as u8,
-            (255.0 * (1.0 - t)) as u8,
-            (60.0 + 140.0 * t) as u8,
-        ];
+        // Nav2 publishes 1..=252 as occupancy 1..=98, and RViz colors
+        // occupancy v as (255*v/100, 0, 255 - 255*v/100).
+        let occupancy = 1 + (97 * (cost - 1)) / 251;
+        let v = (255 * occupancy / 100) as u8;
+        lut[cost] = [v, 0, 255 - v, COSTMAP_ALPHA];
     }
-    
-    lut[INSCRIBED_INFLATED_OBSTACLE] = [255, 140, 0, 220];
-    lut[LETHAL_OBSTACLE] = [255, 0, 0, 255];
-    lut[NO_INFORMATION] = [128, 128, 128, 80];
+
+    lut[INSCRIBED_INFLATED_OBSTACLE] = [0, 255, 255, COSTMAP_ALPHA];
+    lut[LETHAL_OBSTACLE] = [255, 0, 255, COSTMAP_ALPHA];
+    lut[NO_INFORMATION] = [0x70, 0x89, 0x86, COSTMAP_ALPHA];
     lut
 }
 
