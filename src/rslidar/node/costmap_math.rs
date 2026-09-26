@@ -64,25 +64,46 @@ fn distance_to_line(p: Point, p_0: Point, p_1 : Point) -> f32 {
     ((p.x - xx) * (p.x - xx) + (p.y - yy) * (p.y - yy)).sqrt()
 }
 
-// pnpoly ray casting
-fn intersects(polygon: &[Point], testx: f32, testy: f32) -> bool {
-    let n = polygon.len();
-    if n == 0 {
-        return false;
-    }
+trait Intersects {
+    fn intersects(&self, polygon: &[Point]) -> bool;
+}
 
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = (polygon[i].x as f32, polygon[i].y as f32);
-        let (xj, yj) = (polygon[j].x as f32, polygon[j].y as f32);
-
-        if (yi > testy) != (yj > testy)
-            && testx < (xj - xi) * (testy - yi) / (yj - yi) + xi
-        {
-            inside = !inside;
+// pnpoly ray casting: point (x, y) inside polygon
+impl Intersects for (f32, f32) {
+    fn intersects(&self, polygon: &[Point]) -> bool {
+        let (testx, testy) = *self;
+        let n = polygon.len();
+        if n == 0 {
+            return false;
         }
-        j = i;
+
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = (polygon[i].x, polygon[i].y);
+            let (xj, yj) = (polygon[j].x, polygon[j].y);
+
+            if (yi > testy) != (yj > testy)
+                && testx < (xj - xi) * (testy - yi) / (yj - yi) + xi
+            {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
     }
-    inside
+}
+
+// polygon vs polygon: true if any vertex of either lies inside the other
+impl Intersects for &[Point] {
+    fn intersects(&self, polygon: &[Point]) -> bool {
+        fn helper(polygon1: &[Point], polygon2: &[Point]) -> bool {
+            polygon1.iter().any(|p| (p.x, p.y).intersects(polygon2))
+        }
+        helper(self, polygon) || helper(polygon, self)
+    }
+}
+
+fn intersects<T: Intersects>(polygon: &[Point], other: T) -> bool {
+    other.intersects(polygon)
 }

@@ -3,6 +3,10 @@
 #![allow(dead_code)]
 
 mod segmentation;
+mod costmap_math;
+mod costmap_2d;
+mod obstacle_layer;
+mod inflation_layer;
 
 use zenoh::{
     Wait,
@@ -79,6 +83,25 @@ fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(&width.to_le_bytes());
     buf.extend_from_slice(&point_step.to_le_bytes());
     buf.extend_from_slice(data);
+    buf
+}
+
+/// Wire format published on `rslidar/costmap`: a 32-byte header (stamp_sec:
+/// i32, stamp_nanosec: u32, size_x: u32, size_y: u32, resolution: f32,
+/// origin_x: f32, origin_y: f32, reserved: u32, all little-endian) followed by
+/// `size_x * size_y` row-major u8 costs (0 free .. 253 inscribed, 254 lethal,
+/// 255 unknown), cell (0, 0) at (origin_x, origin_y).
+fn encode_costmap(header: &Header, map: &costmap_2d::Costmap2D) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + map.data.len());
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
+    buf.extend_from_slice(&(map.size_x as u32).to_le_bytes());
+    buf.extend_from_slice(&(map.size_y as u32).to_le_bytes());
+    buf.extend_from_slice(&map.resolution.to_le_bytes());
+    buf.extend_from_slice(&map.origin_x.to_le_bytes());
+    buf.extend_from_slice(&map.origin_y.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&map.data);
     buf
 }
 
@@ -227,6 +250,33 @@ impl DriverConfig {
             pcap_rate: scalar_or(text, "pcap_rate", 1.0f32),
             pcap_repeat: scalar_or(text, "pcap_repeat", false),
         }
+    }
+}
+
+/// Reads the `costmap:` block of config.yaml (nav2 costmap.yaml key names);
+/// anything missing keeps CostmapParams::default().
+fn parse_costmap_params(text: &str) -> costmap_2d::CostmapParams {
+    let d = costmap_2d::CostmapParams::default();
+    costmap_2d::CostmapParams {
+        width: scalar_or(text, "width", d.width),
+        height: scalar_or(text, "height", d.height),
+        resolution: scalar_or(text, "resolution", d.resolution),
+        origin_x: scalar_or(text, "origin_x", d.origin_x),
+        origin_y: scalar_or(text, "origin_y", d.origin_y),
+        robot_radius: scalar_or(text, "robot_radius", d.robot_radius),
+        track_unknown_space: scalar_or(text, "track_unknown_space", d.track_unknown_space),
+        sensor_x: scalar_or(text, "sensor_x", d.sensor_x),
+        sensor_y: scalar_or(text, "sensor_y", d.sensor_y),
+        sensor_z: scalar_or(text, "sensor_z", d.sensor_z),
+        min_obstacle_height: scalar_or(text, "min_obstacle_height", d.min_obstacle_height),
+        max_obstacle_height: scalar_or(text, "max_obstacle_height", d.max_obstacle_height),
+        obstacle_max_range: scalar_or(text, "obstacle_max_range", d.obstacle_max_range),
+        obstacle_min_range: scalar_or(text, "obstacle_min_range", d.obstacle_min_range),
+        raytrace_max_range: scalar_or(text, "raytrace_max_range", d.raytrace_max_range),
+        raytrace_min_range: scalar_or(text, "raytrace_min_range", d.raytrace_min_range),
+        clearing_az_res_deg: scalar_or(text, "clearing_az_res_deg", d.clearing_az_res_deg),
+        inflation_radius: scalar_or(text, "inflation_radius", d.inflation_radius),
+        cost_scaling_factor: scalar_or(text, "cost_scaling_factor", d.cost_scaling_factor),
     }
 }
 
@@ -953,6 +1003,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         }
     };
     let cfg = DriverConfig::parse(&text);
+    let costmap_params = parse_costmap_params(&text);
 
     if cfg.lidar_type != "RSHELIOS" {
         eprintln!(
@@ -986,6 +1037,12 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         std::process::exit(1)
     });
 
+    let pub_costmap = publisher(&session, "rslidar/costmap").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
+    let mut costmap = costmap_2d::Costmap::new(&costmap_params);
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut frame_count = 0u64;
 
@@ -1024,7 +1081,16 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         .wait() {
                         eprintln!("rslidar: publish segmented cloud: {error}");
                     }
-                    println!("output")
+
+                    let costmap_start = Instant::now();
+                    costmap.update(&range_graph);
+                    let costmap_ms = costmap_start.elapsed().as_secs_f64() * 1e3;
+                    if let Err(error) = pub_costmap
+                        .put(encode_costmap(&cloud.header, costmap.master()))
+                        .wait() {
+                        eprintln!("rslidar: publish costmap: {error}");
+                    }
+                    println!("output (costmap update {costmap_ms:.2} ms)")
                 }
             }
         }

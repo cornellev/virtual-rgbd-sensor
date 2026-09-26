@@ -2,11 +2,6 @@ use nalgebra::Vector2;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-/// The tunable thresholds `first_segmentation`/`second_segmentation` read
-/// each revolution. Plain data with no Bevy dependency -- wrapped in
-/// `Arc<Mutex<..>>` at the call site so it can be shared between the decoder
-/// thread and a live keyboard-driven tuner in the visualizer (see
-/// `visualization::tune_seg_params`).
 #[derive(Clone, Copy)]
 pub struct SegParams {
     pub seg_enabled: bool,
@@ -39,12 +34,6 @@ pub struct RangeNode {
     pub y : f32,
     pub z : f32,
     pub range : f32,
-    // Calibrated azimuth this point was inserted under, hundredths of a
-    // degree, [0, 36000). Kept alongside x/y/z so should_split can compute
-    // the *actual* angular gap between two same-ring points, needed for the
-    // range*angle expected-distance test -- the (x, y) alone don't recover
-    // azimuth without redoing atan2, and re-deriving it would reintroduce
-    // exactly the kind of precision loss/edge cases storing it avoids.
     pub azimuth_centideg : i32,
     pub point_idx : i32,
     pub valid : bool,
@@ -101,25 +90,13 @@ impl GraphNode {
     }
 }
 
-// Must match the decoder's LASER_NUM (rslidar_sdk_node.rs) -- the ring index
-// passed into `RangeGraph::insert` is the raw hardware channel index, so the
-// grid needs exactly one row per physical channel.
 pub const NUM_RINGS: usize = 32;
-
-// Azimuth-column width, in hundredths of a degree (matches
-// two_layer_seg.cpp's actual `AZ_RES = deg2rad(0.5)` -- note its comment
-// claims 0.4 deg, which is a stale comment/code mismatch in that file, not
-// something to copy here).
 pub const AZ_RES_CENTIDEG: i32 = 10;
 pub const NUM_COLS: usize = (36000 / AZ_RES_CENTIDEG) as usize;
 
-/// `(ring, azimuth-column)` grid of `RangeNode`s -- the "range graph" used
-/// for fast neighbor lookups in segmentation. Unlike two_layer_seg.cpp's
-/// `constructRangeGraph`, which has to guess a point's ring after the fact
-/// by nearest-matching `asin(z/r)` against a fixed angle table, this is
-/// populated directly from `RsHeliosDecoder::decode_msop` while it still
-/// knows the real hardware channel (`chan`) and calibrated azimuth
-/// (`angle_horiz_final`) for each point -- no re-derivation, no guessing.
+/// 2d array representation of LiDAR divided by the vertical angles fired at each time
+/// frame and also the horizontal angles fired consecutively at different timeframes
+/// until we get full 0 -> 359 rotation
 pub struct RangeGraph {
     pub nodes: Vec<RangeNode>,
 }
@@ -160,10 +137,6 @@ impl RangeGraph {
         }
     }
 
-    /// Smallest circular difference between two azimuths, hundredths of a
-    /// degree, in [0, 18000] -- handles the same 359deg/0deg wraparound
-    /// `first_segmentation`'s seam-merge step already has to deal with,
-    /// since two real-angle-adjacent points can straddle that boundary.
     fn azimuth_gap_centideg(a: i32, b: i32) -> i32 {
         let raw = (a - b).rem_euclid(36000);
         raw.min(36000 - raw)
@@ -185,11 +158,6 @@ impl RangeGraph {
         let col_pre = idx_pre % NUM_COLS;
         let col_cur = idx_cur % NUM_COLS;
 
-        // usize wraps the other way from C++'s signed int here: `col_pre - 1`
-        // underflows (and panics in debug builds) when col_pre == 0, instead
-        // of quietly going negative before `+ NUM_COLS` pulls it back into
-        // range. Adding NUM_COLS first avoids ever computing a negative/
-        // underflowed intermediate value.
         let col_pre_inner = (col_pre + NUM_COLS - 1) % NUM_COLS;
         let idx_pre_inner = ring * NUM_COLS + col_pre_inner;
         let col_cur_inner = (col_cur + 1) % NUM_COLS;
@@ -210,23 +178,11 @@ impl RangeGraph {
         Some([v1, v2])
     }
 
-    /// True if `idx_cur`/`idx_pre` should be different segments (the same
-    /// distance/angle-bisector test the C++ inlines in `firstSegmentation`),
-    /// false if they belong to the same one. Also false when `get_vecs` can't
-    /// compute the geometry (not enough neighboring cells to judge) --
-    /// mirrors that case just continuing the current segment rather than
-    /// forcing a split it has no basis for.
-    ///
-    /// `th_d` is a dimensionless scale on the *expected* same-ring point
-    /// spacing (arc length = average range * azimuth gap in radians) rather
-    /// than a flat distance in meters: two points a given azimuth apart are
-    /// naturally farther apart in real space the farther they are from the
-    /// sensor, so comparing the actual gap to a fixed constant either splits
-    /// too eagerly far away or merges too eagerly up close. Comparing it to
-    /// a multiple of the purely-angular-resolution expected gap instead
-    /// makes the test range-adaptive without needing a second parameter.
-    /// `min_gap_m` floors the resulting threshold -- see its doc on
-    /// `SegParams` for why the range-scaled threshold alone isn't enough.
+    /// this is basically whether or not two points are horizontally adjacent:
+    /// like checks distance in terms of x and y,
+    /// and also the angle formed by the vectors formed by prev -> curr and curr -> next points
+    /// in the channel: like to figure out whether or not two points represent corners of seperate surfaces that are
+    /// close together or actually part of the same surface
     fn should_split(&mut self, idx_cur: usize, idx_pre: usize, ring: usize, th_d: f32, th_z: f32, min_gap_m: f32) -> bool {
         let dist = self.point_dist(idx_cur, idx_pre);
         // these are vectors depicting orientation of surface between two suspected objects
@@ -254,17 +210,8 @@ impl RangeGraph {
         dist > th_d * avg_range / 0.3 || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
     }
 
-    /// Labels same-ring segments (`RangeNode::alpha`) *and* builds
-    /// `set_graph`'s `GraphNode`s for this revolution, in one pass over the
-    /// range graph instead of two -- two_layer_seg.cpp (and this file, until
-    /// now) did this as firstSegmentation followed by a separate full
-    /// buildSetGraph traversal, which is exactly the extra traversal the
-    /// paper's "we traverse the two-layer-graph structure twice" design
-    /// doesn't call for: one pass over the range graph (labeling and node
-    /// construction together), one pass over the set graph
-    /// (second_segmentation). Accumulating each segment's GraphNode as its
-    /// cells are labeled, rather than re-discovering segments from scratch
-    /// afterward, gets down to that.
+    /// given each vertical channel: which are the horizontal rows in RangeGraph split defined by each vertical angle
+    /// of the LiDAR, segment horizontally to form SetGraph
     pub fn first_segmentation(&mut self, set_graph: &mut SetGraph, th_d : f32, th_z : f32, min_gap_m : f32) {
         set_graph.clear();
 
@@ -312,19 +259,6 @@ impl RangeGraph {
                 }
             }
 
-            // Column 0 and NUM_COLS-1 are the same azimuth seam on an actual
-            // 360deg ring, but the scan above treats them as the two ends of
-            // a plain array -- so a segment straddling that seam (e.g.
-            // anything spanning the 359deg/0deg boundary, which sits along
-            // +X here) always gets cut into two, with no later stage ever
-            // rejoining them: get_neighbors only looks at rings above/below,
-            // never within the same ring. Re-run the same split test between
-            // the ring's last valid column and its first, and merge them
-            // back into one segment if the test says they shouldn't have
-            // been split. Folding one seg_map entry's already-accumulated
-            // sums/members into the other is cheap (bounded by that one
-            // segment's size) and avoids re-scanning the whole ring the way
-            // relabeling every cell individually would.
             let first_j = (0..NUM_COLS).find(|&j| self.nodes[i * NUM_COLS + j].valid);
             let last_j = (0..NUM_COLS).rev().find(|&j| self.nodes[i * NUM_COLS + j].valid);
             if let (Some(first_j), Some(last_j)) = (first_j, last_j) {
@@ -352,10 +286,6 @@ impl RangeGraph {
                 }
             }
 
-            // Drain the map into this ring's set-graph row, turning the
-            // running sums above into means, then sort by start_pos so
-            // segment order within a ring is deterministic (get_neighbors's
-            // early-exit column-overlap check relies on this order).
             for (_, mut node) in seg_map {
                 let n = node.members.len() as f32;
                 node.x_mean /= n;
@@ -369,13 +299,7 @@ impl RangeGraph {
     }
 }
 
-/// Set graph `G_c`: one `Vec<GraphNode>` per ring, where each `GraphNode` is
-/// one contiguous same-`alpha` segment from `firstSegmentation`, compressed
-/// down to its mean position and the `RangeGraph` indices it covers. Unlike
-/// `RangeGraph`, this is jagged (rings have different segment counts) and
-/// gets fully rebuilt from a `RangeGraph` every revolution -- there's
-/// nothing meaningful to pre-fill, so "empty" is just NUM_RINGS empty rows,
-/// mirroring `G_c.assign(NUM_RINGS, {})` in two_layer_seg.cpp.
+/// setgraph is the result of horizontal 1st segmentation
 pub struct SetGraph {
     pub nodes: Vec<Vec<GraphNode>>
 }
@@ -472,13 +396,9 @@ impl SetGraph {
         nbrs
     }
 
-    /// Flood-fills adjacent segments (within `cross_ring_threshold`) across
-    /// rings into final clusters, then writes each cluster id back onto the
-    /// `RangeGraph` cells it came from -- mirrors
-    /// `TwoLayerNode::secondSegmentation`. Takes `g_r` mutably because that
-    /// final write-back step needs somewhere to put the result; the C++
-    /// used a separate `cluster_ids_` array, but `RangeNode` already has a
-    /// `beta` field set aside for exactly this.
+    /// this takes the horizontally segmented range graph -> set graph and 
+    /// then runs BFS given vertically adjacent neighbors to merge vertically
+    /// and rings
     pub fn second_segmentation(
         &mut self,
         g_r: &mut RangeGraph,
@@ -519,13 +439,6 @@ impl SetGraph {
             }
         }
 
-        // Total point count per cluster, so tiny ones can be dropped next --
-        // mirrors two_layer_seg.cpp's extractClusters keeping only clusters
-        // with >= 10 points. Without this, isolated range-noise outliers
-        // (a single point whose neighbor comparison happened to fail) each
-        // survive as their own 1-3 point "cluster" and get a distinct,
-        // effectively arbitrary color -- verified this was happening on
-        // real data: ~68% of all clusters had 3 points or fewer.
         let mut cluster_sizes: HashMap<i32, usize> = HashMap::new();
         for i in 0..NUM_RINGS {
             for node in &self.nodes[i] {
@@ -533,12 +446,7 @@ impl SetGraph {
             }
         }
 
-        // Propagate final cluster ids back to the RangeGraph cells each
-        // GraphNode was built from, so a later extractClusters-equivalent
-        // can group raw points by cluster. Clusters under min_cluster_points
-        // get beta = -1 (same "no cluster" value RangeNode::new() already
-        // uses) instead of their real id, so they render as unclustered
-        // noise rather than a real (but meaningless) cluster color.
+        // propagate final cluster ids back to RangeGraph cells that each GraphNode was built from
         for i in 0..NUM_RINGS {
             for node in self.nodes[i].iter() {
                 let size = cluster_sizes.get(&node.cluster).copied().unwrap_or(0);

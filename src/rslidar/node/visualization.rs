@@ -5,8 +5,11 @@
 // `segmentation::SegParams` so the thresholds can be dialed in live from the
 // keyboard while watching the cluster coloring update.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy_points::prelude::*;
 use bevy_points::material::PointsShaderSettings;
 
@@ -69,6 +72,147 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
         })),
         PointCloudEntity,
     ));
+
+    // The costmap plane is spawned by `drain_latest_costmap` once the first
+    // costmap arrives, since its size comes from the costmap header.
+}
+
+/// One costmap as published on `rslidar/costmap` (see `encode_costmap` in
+/// rslidar_sdk_node.rs): row-major u8 costs, cell (0, 0) at
+/// (`origin_x`, `origin_y`) in the LiDAR frame.
+pub struct VizCostmap {
+    pub size_x: usize,
+    pub size_y: usize,
+    pub resolution: f32,
+    pub origin_x: f32,
+    pub origin_y: f32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Resource)]
+pub struct CostmapChannel(pub Mutex<mpsc::Receiver<VizCostmap>>);
+
+/// The textured plane the costmap is drawn on. Spawned by
+/// `drain_latest_costmap` on the first costmap, since the grid size isn't
+/// known before then; the handles let it rewrite the texture in place after.
+#[derive(Component)]
+pub struct CostmapPlane {
+    image: Handle<Image>,
+    material: Handle<StandardMaterial>,
+    size_x: usize,
+    size_y: usize,
+}
+
+/// Height (Bevy Y, i.e. LiDAR z) the costmap plane is drawn at. Just under
+/// the LiDAR by default; set it to minus the mount height to lay it on the
+/// ground points instead.
+const COSTMAP_PLANE_Y: f32 = -0.05;
+
+/// sRGB RGBA for each cost value: free is fully transparent so the point
+/// cloud stays readable, the inflation falloff (1..=252) fades blue -> yellow,
+/// inscribed (253) is orange, lethal (254) solid red, unknown (255) faint gray.
+fn costmap_colors() -> [[u8; 4]; 256] {
+    let mut lut = [[0u8; 4]; 256];
+    for cost in 1..=252usize {
+        let t = cost as f32 / 252.0;
+        lut[cost] = [
+            (255.0 * t) as u8,
+            (90.0 + 130.0 * t) as u8,
+            (255.0 * (1.0 - t)) as u8,
+            (60.0 + 140.0 * t) as u8,
+        ];
+    }
+    lut[253] = [255, 140, 0, 220];
+    lut[254] = [255, 0, 0, 255];
+    lut[255] = [128, 128, 128, 80];
+    lut
+}
+
+/// Pulls the newest costmap off the channel and repaints the plane's texture
+/// with it, spawning (or resizing) the plane first if needed.
+pub fn drain_latest_costmap(
+    mut commands: Commands,
+    channel: Res<CostmapChannel>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query: Query<(Entity, &CostmapPlane, &mut Transform)>,
+) {
+    let latest = {
+        let rx = channel.0.lock().unwrap();
+        let mut latest = None;
+        while let Ok(costmap) = rx.try_recv() {
+            latest = Some(costmap);
+        }
+        latest
+    };
+    let Some(costmap) = latest else { return };
+
+    let width = costmap.size_x as f32 * costmap.resolution;
+    let height = costmap.size_y as f32 * costmap.resolution;
+    // Same (x, z, -y) LiDAR -> Bevy remap as the point cloud.
+    let center = Vec3::new(
+        costmap.origin_x + width / 2.0,
+        COSTMAP_PLANE_Y,
+        -(costmap.origin_y + height / 2.0),
+    );
+
+    let existing = query.single_mut().ok();
+    let (image_handle, material_handle) = match existing {
+        Some((_, plane, mut transform))
+            if plane.size_x == costmap.size_x && plane.size_y == costmap.size_y =>
+        {
+            transform.translation = center;
+            (plane.image.clone(), plane.material.clone())
+        }
+        other => {
+            if let Some((entity, _, _)) = other {
+                commands.entity(entity).despawn();
+            }
+            let mut image = Image::new_fill(
+                Extent3d { width: costmap.size_x as u32, height: costmap.size_y as u32, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                &[0, 0, 0, 0],
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            );
+            // Nearest, so each cell stays a crisp square instead of blurring
+            // into its neighbors.
+            image.sampler = ImageSampler::nearest();
+            let image = images.add(image);
+            let material = materials.add(StandardMaterial {
+                base_color_texture: Some(image.clone()),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None, // still visible when orbiting underneath
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(meshes.add(Plane3d::default().mesh().size(width, height))),
+                MeshMaterial3d(material.clone()),
+                Transform::from_translation(center),
+                CostmapPlane { image: image.clone(), material: material.clone(), size_x: costmap.size_x, size_y: costmap.size_y },
+            ));
+            (image, material)
+        }
+    };
+
+    let Some(image) = images.get_mut(&image_handle) else { return };
+    let Some(pixels) = image.data.as_mut() else { return };
+    // Plane3d's UVs run u along +X and v along +Z, so texture row 0 is the
+    // -Z edge -- which, after the (x, z, -y) remap, is the costmap's
+    // highest-y row. Hence the flip.
+    let lut = costmap_colors();
+    for (row, pixel_row) in pixels.chunks_exact_mut(costmap.size_x * 4).enumerate() {
+        let my = costmap.size_y - 1 - row;
+        let costs = &costmap.data[my * costmap.size_x..(my + 1) * costmap.size_x];
+        for (pixel, &cost) in pixel_row.chunks_exact_mut(4).zip(costs) {
+            pixel.copy_from_slice(&lut[cost as usize]);
+        }
+    }
+    // Touch the material too so its bind group picks up the re-uploaded
+    // texture; some Bevy versions don't notice an image change on its own.
+    materials.get_mut(&material_handle);
 }
 
 const AXIS_LENGTH: f32 = 1.0;
@@ -231,28 +375,6 @@ pub fn orbit_camera(
 #[derive(Resource, Clone)]
 pub struct SegParamsHandle(pub Arc<Mutex<SegParams>>);
 
-/// Dials the segmentation thresholds up or down with the keyboard so you can
-/// watch clustering change live instead of editing code and rebuilding:
-/// '['/']' step first_segmentation's `th_d` (scale on the expected same-ring
-/// gap), ';'/''' step its `th_z` (degrees), '-'/'=' step second_segmentation's
-/// `th_d_second` (scale on the expected cross-ring gap), ','/'.' step
-/// `k_deg` (extra per-degree scale on top of `th_d_second`), '`'/'\' step
-/// `z_weight` (how much a dz contributes to node_dist relative to dx/dy),
-/// '9'/'0' step `min_cluster_points` (clusters smaller than this get
-/// discarded as noise instead of a real color), 'n'/'m' step `min_gap_m`
-/// (the absolute floor under both thresholds, so close-range comparisons
-/// don't get a smaller window than the sensor's actual noise floor -- it
-/// also doubles as the fraction used in node_dist's dz-gate, see its doc).
-/// Space toggles `seg_enabled` -- when off, the decode loop skips
-/// first_segmentation/second_segmentation entirely, so the printed
-/// per-revolution ms and the point coloring both flip live, letting you
-/// compare decode-only vs. decode+segmentation without restarting. 'h'
-/// toggles `height_filter_enabled` (drops points below `min_height`, in
-/// both the rendered cloud and segmentation, before either ever sees them);
-/// 'j'/'k' step `min_height` down/up (vim-style: j lowers the cutoff, k
-/// raises it) while the filter is on or off, so it's already dialed in by
-/// the time you flip 'h'. Each tap is one step (not held-repeat), so nudging
-/// is deliberate rather than racing past the value you wanted.
 pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHandle>) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;

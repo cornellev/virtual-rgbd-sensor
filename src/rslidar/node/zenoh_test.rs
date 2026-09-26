@@ -6,8 +6,8 @@
 mod segmentation;
 mod visualization;
 use visualization::{
-    draw_origin_axes, drain_latest_cloud, orbit_camera, setup_scene, CloudChannel, OrbitCamera,
-    VizPoint,
+    draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, CloudChannel,
+    CostmapChannel, OrbitCamera, VizCostmap, VizPoint,
 };
 
 use zenoh::Wait;
@@ -20,6 +20,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
+const COSTMAP_KEY: &str = "rslidar/costmap";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Mirrors `encode_points`/`build_segmented_data` in rslidar_sdk_node.rs: a
@@ -63,8 +64,35 @@ fn decode_points(payload: &[u8]) -> Option<Vec<VizPoint>> {
     )
 }
 
+/// Mirrors `encode_costmap` in rslidar_sdk_node.rs: a 32-byte header
+/// (stamp_sec: i32, stamp_nanosec: u32, size_x: u32, size_y: u32,
+/// resolution: f32, origin_x: f32, origin_y: f32, reserved: u32, all
+/// little-endian) followed by `size_x * size_y` row-major u8 costs.
+fn decode_costmap(payload: &[u8]) -> Option<VizCostmap> {
+    if payload.len() < 32 {
+        return None;
+    }
+    let u32_at = |i: usize| u32::from_le_bytes(payload[i..i + 4].try_into().unwrap());
+    let f32_at = |i: usize| f32::from_le_bytes(payload[i..i + 4].try_into().unwrap());
+    let size_x = u32_at(8) as usize;
+    let size_y = u32_at(12) as usize;
+    let data = &payload[32..];
+    if size_x == 0 || size_y == 0 || data.len() < size_x * size_y {
+        return None;
+    }
+    Some(VizCostmap {
+        size_x,
+        size_y,
+        resolution: f32_at(16),
+        origin_x: f32_at(20),
+        origin_y: f32_at(24),
+        data: data[..size_x * size_y].to_vec(),
+    })
+}
+
 fn main() {
     let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
+    let (costmap_tx, costmap_rx) = mpsc::channel::<VizCostmap>();
 
     let session = zenoh::open(zenoh::Config::default())
         .wait()
@@ -75,7 +103,7 @@ fn main() {
 
     // Kept alive for the whole process: dropping it would cancel the
     // subscription.
-    let _subscriber = session
+    let _points_subscriber = session
         .declare_subscriber(POINTS_KEY)
         .callback(move |sample| {
             let payload = sample.payload().to_bytes();
@@ -97,14 +125,31 @@ fn main() {
             std::process::exit(1)
         });
 
-    println!("zenoh_test: subscribed to {POINTS_KEY}, waiting for frames...");
+    let _costmap_subscriber = session
+        .declare_subscriber(COSTMAP_KEY)
+        .callback(move |sample| {
+            let payload = sample.payload().to_bytes();
+            if let Some(costmap) = decode_costmap(&payload) {
+                let _ = costmap_tx.send(costmap);
+            } else {
+                eprintln!("zenoh_test: dropping malformed costmap ({} bytes)", payload.len());
+            }
+        })
+        .wait()
+        .unwrap_or_else(|error| {
+            eprintln!("zenoh_test: failed to subscribe to {COSTMAP_KEY}: {error}");
+            std::process::exit(1)
+        });
+
+    println!("zenoh_test: subscribed to {POINTS_KEY} and {COSTMAP_KEY}, waiting for frames...");
 
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(PointsPlugin)
         .insert_resource(CloudChannel(Mutex::new(viz_rx)))
+        .insert_resource(CostmapChannel(Mutex::new(costmap_rx)))
         .insert_resource(OrbitCamera::default())
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (drain_latest_cloud, orbit_camera, draw_origin_axes))
+        .add_systems(Update, (drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
         .run();
 }
