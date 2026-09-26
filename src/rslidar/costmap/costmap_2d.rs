@@ -67,14 +67,14 @@ impl Default for CostmapParams {
             sensor_x: 0.0,
             sensor_y: 0.0,
             sensor_z: 0.0,
-            min_obstacle_height: -0.2,
-            max_obstacle_height: 2.0,
+            min_obstacle_height: -3.0,
+            max_obstacle_height: 3.0,
             obstacle_max_range: 15.0,
             obstacle_min_range: 0.0,
             raytrace_max_range: 20.0,
             raytrace_min_range: 0.0,
             clearing_az_res_deg: 0.4,
-            inflation_radius: 0.55,
+            inflation_radius: 0.3,
             cost_scaling_factor: 10.0,
         }
     }

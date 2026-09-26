@@ -15,6 +15,10 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+pub const NO_INFORMATION: usize = 255;
+pub const LETHAL_OBSTACLE: usize = 254;
+pub const INSCRIBED_INFLATED_OBSTACLE: usize = 253;
+
 /// one clustered point from the point cloud
 #[derive(Clone, Copy)]
 pub struct VizPoint {
@@ -108,9 +112,10 @@ fn costmap_colors() -> [[u8; 4]; 256] {
             (60.0 + 140.0 * t) as u8,
         ];
     }
-    lut[253] = [255, 140, 0, 220];
-    lut[254] = [255, 0, 0, 255];
-    lut[255] = [128, 128, 128, 80];
+    
+    lut[INSCRIBED_INFLATED_OBSTACLE] = [255, 140, 0, 220];
+    lut[LETHAL_OBSTACLE] = [255, 0, 0, 255];
+    lut[NO_INFORMATION] = [128, 128, 128, 80];
     lut
 }
 

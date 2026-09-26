@@ -21,7 +21,7 @@ impl Default for SegParams {
         Self {
             seg_enabled: true,
             height_filter_enabled: false,
-            min_height: -0.3,
+            min_height: -0.3, // ceiling is a problem
             th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.1, k_deg: 1.0, z_weight: 1.0,
             min_cluster_points: 3, min_gap_m: 1.0,
         }
