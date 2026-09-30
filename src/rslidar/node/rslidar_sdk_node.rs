@@ -65,6 +65,21 @@ const FIRING_TSS_US: [f64; 32] = [
 ];
 
 // zenoh stuff
+
+// Fixed instead of zenoh's default random port so subscribers that can't use
+// multicast discovery (e.g. the dashboard in a Docker bridge network) can
+// connect directly. 7447 is zenoh's conventional port. Multicast discovery
+// still works as before.
+const ZENOH_LISTEN_ENDPOINT: &str = "tcp/[::]:7447";
+
+fn zenoh_config() -> Result<zenoh::Config> {
+    let mut config = zenoh::Config::default();
+    config
+        .insert_json5("listen/endpoints", &format!(r#"["{ZENOH_LISTEN_ENDPOINT}"]"#))
+        .map_err(|error| anyhow::anyhow!("set zenoh listen endpoint: {error}"))?;
+    Ok(config)
+}
+
 fn publisher<'a>(session: &'a zenoh::Session, key: &'static str) -> Result<Publisher<'a>> {
     session
         .declare_publisher(key)
@@ -1025,12 +1040,17 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
     let (tx, rx) = mpsc::channel::<RawPacket>();
     spawn_packet_source(&cfg, tx);
 
-    let session = zenoh::open(zenoh::Config::default())
+    let zenoh_config = zenoh_config().unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+    let session = zenoh::open(zenoh_config)
         .wait()
         .unwrap_or_else(|error| {
-            eprintln!("rslidar: failed to open zenoh session: {error}");
+            eprintln!("rslidar: failed to open zenoh session on {ZENOH_LISTEN_ENDPOINT}: {error}");
             std::process::exit(1)
         });
+    println!("rslidar: zenoh listening on {ZENOH_LISTEN_ENDPOINT}");
     let pub_raw = publisher(&session, "rslidar/points/raw").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
