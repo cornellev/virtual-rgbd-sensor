@@ -1073,17 +1073,25 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         }
                     }
 
-                    if let Err(error) = pub_raw
-                        .put(encode_points(&cloud.header, cloud.point_step, &cloud.data))
-                        .wait() {
+                    let cloud_start = Instant::now();
+                    let raw_payload = encode_points(&cloud.header, cloud.point_step, &cloud.data);
+                    let raw_bytes = raw_payload.len();
+                    if let Err(error) = pub_raw.put(raw_payload).wait() {
                         eprintln!("rslidar: publish raw cloud: {error}");
                     }
                     let seg_data = build_segmented_data(&cloud.data, &point_cluster);
-                    if let Err(error) = pub_seg
-                        .put(encode_points(&cloud.header, SEG_POINT_STEP, &seg_data))
-                        .wait() {
+                    let seg_payload = encode_points(&cloud.header, SEG_POINT_STEP, &seg_data);
+                    let seg_bytes = seg_payload.len();
+                    if let Err(error) = pub_seg.put(seg_payload).wait() {
                         eprintln!("rslidar: publish segmented cloud: {error}");
                     }
+                    let cloud_ms = cloud_start.elapsed().as_secs_f64() * 1e3;
+                    println!(
+                        "point cloud: {} pts, raw {:.1} KB, seg {:.1} KB ({cloud_ms:.2} ms)",
+                        cloud.width,
+                        raw_bytes as f64 / 1024.0,
+                        seg_bytes as f64 / 1024.0,
+                    );
 
                     let costmap_start = Instant::now();
                     costmap.update(&range_graph);

@@ -26,6 +26,7 @@ pub struct VizPoint {
     pub y: f32,
     pub z: f32,
     pub cluster: i32,
+    pub intensity: f32
 }
 
 /// Wraps the receiving end of the decoder -> visualizer channel as a Bevy
@@ -41,6 +42,22 @@ pub struct CloudChannel(pub Mutex<mpsc::Receiver<Vec<VizPoint>>>);
 #[derive(Component)]
 pub struct PointCloudEntity;
 
+/// Display-only tilt applied to the point cloud to compensate for the LiDAR
+/// being mounted tilted. Only the cloud entity gets this -- the costmap plane
+/// is untouched.
+/// Roll: about the LiDAR x (forward) axis, which is Bevy +X.
+const CLOUD_ROLL_DEG: f32 = -10.0;
+/// Pitch: about the LiDAR y (left) axis, which is Bevy -Z; positive lifts the
+/// forward (+x) side above the xy plane.
+const CLOUD_PITCH_DEG: f32 = -2.0;
+
+/// Roll first, then pitch, both about the fixed (parent) axes. In a
+/// quaternion product the right-hand rotation is applied first.
+fn cloud_tilt() -> Quat {
+    Quat::from_rotation_z(CLOUD_PITCH_DEG.to_radians())
+        * Quat::from_rotation_x(CLOUD_ROLL_DEG.to_radians())
+}
+
 pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<PointsMaterial>>) {
     // Initial pose only -- `orbit_camera` recomputes this every frame from
     // the `OrbitCamera` resource, which starts at this same position.
@@ -55,7 +72,7 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
         Mesh3d(meshes.add(PointsMesh::from_iter(std::iter::empty::<Vec3>()))),
         MeshMaterial3d(materials.add(PointsMaterial {
             settings: PointsShaderSettings {
-                point_size: 0.01,
+                point_size: 0.02,
                 color: Color::WHITE.into(),
                 ..default()
             },
@@ -63,6 +80,7 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
             circle: true,
             ..default()
         })),
+        Transform::from_rotation(cloud_tilt()),
         PointCloudEntity,
     ));
 }
@@ -220,11 +238,51 @@ pub fn draw_origin_axes(mut gizmos: Gizmos) {
     gizmos.arrow(Vec3::ZERO, Vec3::Z * AXIS_LENGTH, Color::srgb(0.0, 0.4, 1.0));
 }
 
+/// How `drain_latest_cloud` colors points; Space cycles it (`toggle_color_mode`).
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CloudColorMode {
+    /// One hue per cluster, unclustered points gray.
+    #[default]
+    Cluster,
+    /// Red near -> blue far, ignoring clusters.
+    Range,
+    Intensity
+}
+
+pub fn toggle_color_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<CloudColorMode>) {
+    if keys.just_pressed(KeyCode::Space) {
+        *mode = match *mode {
+            CloudColorMode::Cluster => CloudColorMode::Range,
+            CloudColorMode::Range => CloudColorMode::Intensity,
+            CloudColorMode::Intensity => CloudColorMode::Cluster,
+        };
+        println!("visualization: color mode = {:?}", *mode);
+    }
+}
+
+/// Ranges (meters from the LiDAR) the range gradient spans;
+/// anything closer/farther clamps to the end colors.
+const RANGE_NEAR_M: f32 = 0.5;
+const RANGE_FAR_M: f32 = 20.0;
+
+/// Red when close, sweeping through the hues to blue when far.
+fn range_color(p: &VizPoint) -> Color {
+    let range = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+    let t = ((range - RANGE_NEAR_M) / (RANGE_FAR_M - RANGE_NEAR_M)).clamp(0.0, 1.0);
+    Color::hsl(240.0 * t, 0.9, 0.5)
+}
+
+fn intensity_color(p: &VizPoint) -> Color {
+    let t = (p.intensity / 255.0).clamp(0.0, 1.0);
+    Color::hsl(0.0, 0.0, 0.15 + 0.85 * t)
+}
+
 /// Pulls the most recently completed cloud off the channel (dropping any
 /// older ones that piled up while the app was busy rendering) and rebuilds
 /// the point mesh from it.
 pub fn drain_latest_cloud(
     channel: Res<CloudChannel>,
+    mode: Res<CloudColorMode>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut query: Query<&mut Mesh3d, With<PointCloudEntity>>,
 ) {
@@ -249,7 +307,11 @@ pub fn drain_latest_cloud(
     let colors: Vec<Color> = cloud
         .iter()
         .map(|p| {
-            if p.cluster < 0 {
+            if *mode == CloudColorMode::Intensity {
+                intensity_color(p)
+            } else if *mode == CloudColorMode::Range {
+                range_color(p)
+            } else if p.cluster < 0 {
                 Color::srgb(0.4, 0.4, 0.4)
             } else {
                 let hue = (p.cluster as f32 * GOLDEN_ANGLE_DEG) % 360.0;

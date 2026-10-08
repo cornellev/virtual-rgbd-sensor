@@ -6,7 +6,8 @@
 mod segmentation;
 mod visualization;
 use visualization::{
-    draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, CloudChannel,
+    draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, toggle_color_mode,
+    CloudChannel, CloudColorMode,
     CostmapChannel, OrbitCamera, VizCostmap, VizPoint,
 };
 
@@ -50,6 +51,7 @@ fn decode_points(payload: &[u8]) -> Option<Vec<VizPoint>> {
                 let x = f32::from_le_bytes(rec[0..4].try_into().ok()?);
                 let y = f32::from_le_bytes(rec[4..8].try_into().ok()?);
                 let z = f32::from_le_bytes(rec[8..12].try_into().ok()?);
+                let intensity = f32::from_le_bytes(rec[12..16].try_into().ok()?);
                 if x.is_nan() || y.is_nan() || z.is_nan() {
                     return None;
                 }
@@ -58,7 +60,7 @@ fn decode_points(payload: &[u8]) -> Option<Vec<VizPoint>> {
                 } else {
                     -1
                 };
-                Some(VizPoint { x, y, z, cluster })
+                Some(VizPoint { x, y, z, cluster, intensity })
             })
             .collect(),
     )
@@ -149,7 +151,8 @@ fn main() {
         .insert_resource(CloudChannel(Mutex::new(viz_rx)))
         .insert_resource(CostmapChannel(Mutex::new(costmap_rx)))
         .insert_resource(OrbitCamera::default())
+        .init_resource::<CloudColorMode>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
+        .add_systems(Update, (toggle_color_mode, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
         .run();
 }
