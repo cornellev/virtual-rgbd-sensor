@@ -72,7 +72,7 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
         Mesh3d(meshes.add(PointsMesh::from_iter(std::iter::empty::<Vec3>()))),
         MeshMaterial3d(materials.add(PointsMaterial {
             settings: PointsShaderSettings {
-                point_size: 0.02,
+                point_size: 0.05,
                 color: Color::WHITE.into(),
                 ..default()
             },

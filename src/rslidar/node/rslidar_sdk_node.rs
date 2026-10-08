@@ -760,7 +760,7 @@ impl RsHeliosDecoder {
                     self.range_graph.insert(
                         ring,
                         azimuth_round(angle_horiz_final),
-                        x, y, z,
+                        x, y, z, intensity.into(),
                         distance,
                         point_idx,
                     );
@@ -1048,6 +1048,8 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
     let mut costmap = costmap_2d::Costmap::new(&costmap_params);
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut frame_count = 0u64;
+    let image_dir = std::path::Path::new("range_images");
+    std::fs::create_dir_all(image_dir).expect("create range_images dir");
 
     println!("rslidar: waiting for DIFOP/MSOP packets...");
     for msg in rx {
@@ -1100,6 +1102,9 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         .put(encode_costmap(&cloud.header, costmap.master()))
                         .wait() {
                         eprintln!("rslidar: publish costmap: {error}");
+                    }
+                    if let Err(error) = range_graph.write_images(image_dir, frame_count, 0, segmentation::NUM_COLS) {
+                        eprintln!("rslidar: write range images: {error}");
                     }
                     println!("output (costmap update {costmap_ms:.2} ms)")
                 }
