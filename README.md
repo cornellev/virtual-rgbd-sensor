@@ -1,5 +1,5 @@
 # Virtual RGBD Sensor
-In Rust!
+In Rust! Read the documentation [here](/documentation/report.pdf).
 
 ## Table of Contents 
 1) [Features](#features)
