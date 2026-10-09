@@ -86,12 +86,31 @@ fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     buf
 }
 
-// fn encode_rangegraph(header: &Header, rangegraph: &) {
-//     let mut buf = Vec::with_capacity(...);
-//     buf.extend_from_slice(&header.stamp.sec.to_le_bytes());
-//     buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
-//     buf
-// }
+const RANGEGRAPH_RECORD_LEN: usize = 24; // x, y, z, intensity, range (f32) + cluster_id (i32)
+
+/// Wire format published on `rslidar/points/rangegraph`: a 32-byte header
+/// (stamp_sec: i32, stamp_nanosec: u32, rows: u32, cols: u32,
+/// az_res_centideg: u32, record_len: u32, reserved: u64, all little-endian)
+/// followed by `rows * cols` records indexed `ring * cols + col`. Empty cells
+/// have range 0.0 and cluster_id -1.
+fn encode_rangegraph(header: &Header, graph: &segmentation::RangeGraph) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + graph.nodes.len() * RANGEGRAPH_RECORD_LEN);
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
+    buf.extend_from_slice(&(segmentation::NUM_RINGS as u32).to_le_bytes());
+    buf.extend_from_slice(&(segmentation::NUM_COLS as u32).to_le_bytes());
+    buf.extend_from_slice(&(segmentation::AZ_RES_CENTIDEG as u32).to_le_bytes());
+    buf.extend_from_slice(&(RANGEGRAPH_RECORD_LEN as u32).to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    for n in &graph.nodes {
+        let (range, cluster) = if n.valid { (n.range, n.beta) } else { (0.0, -1) };
+        for v in [n.x, n.y, n.z, n.intensity, range] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf.extend_from_slice(&cluster.to_le_bytes());
+    }
+    buf
+}
 
 /// Wire format published on `rslidar/costmap`: a 32-byte header (stamp_sec:
 /// i32, stamp_nanosec: u32, size_x: u32, size_y: u32, resolution: f32,
@@ -241,6 +260,11 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         .put(encode_costmap(&cloud.header, costmap.master()))
                         .wait() {
                         eprintln!("rslidar: publish costmap: {error}");
+                    }
+                    if let Err(error) = pub_rangegraph
+                        .put(encode_rangegraph(&cloud.header, &range_graph))
+                        .wait() {
+                        eprintln!("rslidar: publish range graph: {error}");
                     }
                     if let Err(error) = range_graph.write_images(image_dir, frame_count, 0, segmentation::NUM_COLS) {
                         eprintln!("rslidar: write range images: {error}");
