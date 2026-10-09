@@ -180,8 +180,8 @@ impl RangeGraph {
                 }
             }
         }
-        range_img.save(dir.join(format!("range_{frame:05}.png")))?;
-        inten_img.save(dir.join(format!("intensity_{frame:05}.png")))?;
+        range_img.save(dir.join(format!("range.png")))?;
+        inten_img.save(dir.join(format!("intensity.png")))?;
 
         // previews: histogram-equalized over valid pixels (both channels are heavily
         // skewed -- most intensities are < 10, most ranges are a few metres);
@@ -207,7 +207,7 @@ impl RangeGraph {
         std::fs::create_dir_all(&preview_dir)?;
         for (name, img) in [("range", range_view), ("intensity", inten_view)] {
             imageops::resize(&img, w, h * PREVIEW_ROW_SCALE, FilterType::Nearest)
-                .save(preview_dir.join(format!("{name}_{frame:05}.png")))?;
+                .save(preview_dir.join(format!("{name}.png")))?;
         }
         Ok(())
     }

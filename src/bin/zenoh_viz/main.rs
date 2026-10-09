@@ -3,7 +3,7 @@
 // opens a window -- `rslidar_sdk_node` is a headless decode+publish process.
 #![allow(dead_code)]
 
-mod segmentation;
+use virtual_rgbd_sensor::segmentation;
 mod visualization;
 use visualization::{
     draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, toggle_color_mode,

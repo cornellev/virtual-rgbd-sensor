@@ -54,7 +54,10 @@ prior knowledge of a LiDAR's beam firing patterns, then performing two seperate 
 
 \textbf{First segmentation.} Clustering horizontally adjacent points to populate a set graph. This serves to significantly reduce the amount of points that need
 to be traversed and explored in the second segmentation by first conducting a parallelizable clustering among points within the same channel or vertical angle.
-\textbf{Second segmentation.} Merging vertically adjacent nodes via BFS or possible other graph traversal methods over a reduced set of set nodes.
+
+\textbf{Second segmentation.} Merging vertically adjacent nodes via BFS or possible other graph traversal methods over a reduced set of set nodes. Given a SetNode,
+we search for vertically adjacent nodes that intersect with the current horizontal segment, as defined by RangeGraph node's $(\theta_{start}, \theta_{end})$. Specifically,
+ 
 
 \begin{figure}[h]
 \centering
@@ -67,8 +70,20 @@ to be traversed and explored in the second segmentation by first conducting a pa
 \textbf{Proposal.} The idea here is to simulate a form of camera-LiDAR sensor fusion without actually requiring synchronization between a physical camera and LiDAR.
 The RoboSense Helios LiDAR outputs UDP packets containing not only vertical $\theta$ and horizontal $\phi$ firing angles of each laser, the range $r$ travelled 
 prior to collision, and associated timestamps $t$, but also the reflection strength of each laser, also known as intensity. Reflection strength is dependent on the
-material of the surface that each laser beam collided with. As a result, we can essentially construct a sparse inage of the environment around the sensor platform
+material of the surface that each laser beam collided with. As a result, we can essentially construct a sparse image of the environment around the sensor platform
 via an intensity map. This intensity map can be passed in with associated depth information to the KLT algorithm to perform some pseudo-optical flow on a sequence 
 of LiDAR scans.
+"The intensity measured by the LiDAR can be decomposed into four main factors under the Lambertian reflectance assumption: measurement  distance, the surface reflectance, 
+the strength of the incident ray, and the incident angle" (Dai et al.)
 
+The relationship intensity, distance to target or range, and the angle at which the signal strikes the target (angle of incidence) is encapsulated by the LiDAR intensity
+equation:
+$$ I(R, \alpha, \rho) \propto P_r(R, \alpha, \rho) = \eta(R) \frac{I_e \rho \cos(\alpha)}{R^2}, $$
+where $I_e$ denotes the laser's emission power, $R$ signifies the distance to the surface, $\alpha$ represents angle of incidence, and $\rho$ is the parameter indicating 
+the target's reflectivity. 
+The phenomenom of lens defocusing in LiDAR sensors results in a near-range effect $\eta(R)$ that impacts the intensity data at closer ranges ($R_n < 12 m$). This causes
+the intensity equation to be inapplicable within these proximities, and as a result, we will adopt a modeling approach for the near-range effect:
+$$ \eta(R) = 1 - exp{\frac{-2r_d^2(R + d)^2}{D^2 S^2}} $$
+with $r_d$ denoting the radius of the laser detector, $d$ representing the offset between the measured range and object range, $D$ is the diameter of the lens, and $S$
+signifies focal length, respectively. 
 \end{document}
