@@ -9,4 +9,7 @@ pub mod segmentation;
 #[path = "rslidar/costmap/mod.rs"]
 pub mod costmap;
 
+#[path = "rslidar/node/rslidar_math.rs"]
+pub mod rslidar_math;
+
 pub use costmap::{costmap_2d, costmap_math, inflation_layer, obstacle_layer};
