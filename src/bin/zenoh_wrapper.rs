@@ -13,7 +13,7 @@ use zenoh::{
 };
 
 type RslidarShmProvider = ShmProvider<PosixShmProviderBackend>;
-const SHM_POOL_SIZE: usize = 64 * 1024 * 1024;
+const SHM_POOL_SIZE: usize = 16 * 1024 * 1024;
 
 use anyhow::Result;
 use virtual_rgbd_sensor::costmap_2d;
@@ -86,6 +86,16 @@ fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     buf
 }
 
+// fn encode_points_shm(buf: &mut [u8], header: &Header, point_step: u32, data: &[u8]) {
+//     let width = data.len() as u32 / point_step;
+//     buf[0..4](&header.stamp_sec.to_le_bytes());
+//     buf[4..8](&header.stamp_nanosec.to_le_bytes());
+//     buf[8..12](&width.to_le_bytes());
+//     buf[12..16](&point_step.to_le_bytes());
+//     buf[16..20](data);
+//     buf
+// }
+
 const RANGEGRAPH_RECORD_LEN: usize = 24; // x, y, z, intensity, range (f32) + cluster_id (i32)
 
 /// Wire format published on `rslidar/points/rangegraph`: a 32-byte header
@@ -112,6 +122,31 @@ fn encode_rangegraph(header: &Header, graph: &segmentation::RangeGraph) -> Vec<u
     buf
 }
 
+// fn encode_rangegraph_into(buf: &mut [u8], header: &Header, graph: &segmentation::RangeGraph) -> Vec<u8> {
+    
+//     buf[0..4](&header.stamp_sec.to_le_bytes());
+//     buf[4..8](&header.stamp_nanosec.to_le_bytes());
+//     buf[8..12](&(segmentation::NUM_RINGS as u32).to_le_bytes());
+//     buf.extend_from_slice(&(segmentation::NUM_COLS as u32).to_le_bytes());
+//     buf.extend_from_slice(&(segmentation::AZ_RES_CENTIDEG as u32).to_le_bytes());
+//     buf.extend_from_slice(&(RANGEGRAPH_RECORD_LEN as u32).to_le_bytes());
+//     buf.extend_from_slice(&0u64.to_le_bytes());
+//     for n in &graph.nodes {
+//         let (range, cluster) = if n.valid { (n.range, n.beta) } else { (0.0, -1) };
+//         for v in [n.x, n.y, n.z, n.intensity, range] {
+//             buf.extend_from_slice(&v.to_le_bytes());
+//         }
+//         buf.extend_from_slice(&cluster.to_le_bytes());
+//     }
+//     buf
+// }
+
+const COSTMAP_HEADER_LEN: usize = 32;
+
+fn costmap_len(map: &costmap_2d::Costmap2D) -> usize {
+    COSTMAP_HEADER_LEN + map.data.len()
+}
+
 /// Wire format published on `rslidar/costmap`: a 32-byte header (stamp_sec:
 /// i32, stamp_nanosec: u32, size_x: u32, size_y: u32, resolution: f32,
 /// origin_x: f32, origin_y: f32, reserved: u32, all little-endian) followed by
@@ -129,6 +164,19 @@ fn encode_costmap(header: &Header, map: &costmap_2d::Costmap2D) -> Vec<u8> {
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&map.data);
     buf
+}
+
+fn encode_costmap_into(buf: &mut[u8], header: &Header, map: &costmap_2d::Costmap2D) {
+    let (hdr, body) = buf.split_at_mut(COSTMAP_HEADER_LEN);
+    hdr[0..4].copy_from_slice(&header.stamp_sec.to_le_bytes());
+    hdr[4..8].copy_from_slice(&header.stamp_nanosec.to_le_bytes());
+    hdr[8..12].copy_from_slice(&(map.size_x as u32).to_le_bytes());
+    hdr[12..16].copy_from_slice(&(map.size_y as u32).to_le_bytes());
+    hdr[16..20].copy_from_slice(&map.resolution.to_le_bytes());
+    hdr[20..24].copy_from_slice(&map.origin_x.to_le_bytes());
+    hdr[24..28].copy_from_slice(&map.origin_y.to_le_bytes());
+    hdr[28..32].copy_from_slice(&0u32.to_le_bytes());
+    body.copy_from_slice(&map.data);
 }
 
 /// `cloud_data`'s XYZI points (see `POINT_STEP`) with each point's cluster id
@@ -178,7 +226,14 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
     let (tx, rx) = mpsc::channel::<RawPacket>();
     spawn_packet_source(&cfg, tx);
 
-    let session = zenoh::open(zenoh::Config::default())
+    let shm = create_shm_provider(SHM_POOL_SIZE).unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
+    let mut config = zenoh::Config::default();
+    config.insert_json5("transport/shared_memory/transport_optimization/enabled", "false").unwrap();
+    let session = zenoh::open(config)
         .wait()
         .unwrap_or_else(|error| {
             eprintln!("rslidar: failed to open zenoh session: {error}");
@@ -202,6 +257,26 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
+
+    // Live tuning from zenoh_viz; the decoder rereads seg_params every revolution.
+    let shared_params = seg_params.clone();
+    let _seg_params_sub = session
+        .declare_subscriber(segmentation::SEG_PARAMS_KEY)
+        .callback(move |sample| {
+            let payload = sample.payload().to_bytes();
+            match segmentation::SegParams::from_bytes(&payload) {
+                Some(params) => {
+                    println!("rslidar: seg params updated (seg_enabled={})", params.seg_enabled);
+                    *shared_params.lock().unwrap() = params;
+                }
+                None => eprintln!("rslidar: dropping malformed seg params ({} bytes)", payload.len()),
+            }
+        })
+        .wait()
+        .unwrap_or_else(|error| {
+            eprintln!("rslidar: failed to subscribe to {}: {error}", segmentation::SEG_PARAMS_KEY);
+            std::process::exit(1)
+        });
 
     let mut costmap = costmap_2d::Costmap::new(&costmap_params);
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
@@ -256,11 +331,18 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                     let costmap_start = Instant::now();
                     costmap.update(&range_graph);
                     let costmap_ms = costmap_start.elapsed().as_secs_f64() * 1e3;
-                    if let Err(error) = pub_costmap
-                        .put(encode_costmap(&cloud.header, costmap.master()))
-                        .wait() {
+                    // if let Err(error) = pub_costmap
+                    //     .put(encode_costmap(&cloud.header, costmap.master()))
+                    //     .wait() {
+                    //     eprintln!("rslidar: publish costmap: {error}");
+                    // }
+                    let map = costmap.master();
+                    if let Err(error) = publish(&pub_costmap, &shm, costmap_len(map), |buf| {
+                        encode_costmap_into(buf, &cloud.header, map)
+                    }) {
                         eprintln!("rslidar: publish costmap: {error}");
                     }
+
                     if let Err(error) = pub_rangegraph
                         .put(encode_rangegraph(&cloud.header, &range_graph))
                         .wait() {

@@ -9,7 +9,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy_points::prelude::*;
 use bevy_points::material::PointsShaderSettings;
 
-use crate::segmentation::SegParams;
+use crate::segmentation::{SEG_PARAMS_KEY, SegParams};
+use zenoh::Wait;
 
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -46,10 +47,10 @@ pub struct PointCloudEntity;
 /// being mounted tilted. Only the cloud entity gets this -- the costmap plane
 /// is untouched.
 /// Roll: about the LiDAR x (forward) axis, which is Bevy +X.
-const CLOUD_ROLL_DEG: f32 = -10.0;
+const CLOUD_ROLL_DEG: f32 = 0.0; //-10.0;
 /// Pitch: about the LiDAR y (left) axis, which is Bevy -Z; positive lifts the
 /// forward (+x) side above the xy plane.
-const CLOUD_PITCH_DEG: f32 = -2.0;
+const CLOUD_PITCH_DEG: f32 = 0.0; //-2.0;
 
 /// Roll first, then pitch, both about the fixed (parent) axes. In a
 /// quaternion product the right-hand rotation is applied first.
@@ -407,16 +408,22 @@ pub fn orbit_camera(
     transform.look_at(orbit.target, Vec3::Y);
 }
 
-/// Shared, thread-safe handle to `first_segmentation`'s thresholds. The
-/// decoder thread reads it fresh at the start of every revolution (see the
-/// `decode_msop` frame-boundary block in rslidar_sdk_node.rs), so a value
-/// changed here shows up in the clustering within about one revolution --
-/// no restart needed.
+/// The visualizer's copy of the segmentation thresholds. Every change is
+/// published on `SEG_PARAMS_KEY`; zenoh_wrapper copies it into the decoder's
+/// params, which are reread every revolution, so it shows up in the
+/// clustering within about one revolution -- no restart needed.
 #[derive(Resource, Clone)]
 pub struct SegParamsHandle(pub Arc<Mutex<SegParams>>);
 
+#[derive(Resource)]
+pub struct SegParamsPublisher(pub zenoh::Session);
+
 // this is like the scary parameter tuning stuff, delete later, very ew
-pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHandle>) {
+pub fn tune_seg_params(
+    keys: Res<ButtonInput<KeyCode>>,
+    handle: Res<SegParamsHandle>,
+    publisher: Res<SegParamsPublisher>,
+) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;
     const TH_D_SECOND_STEP: f32 = 0.01;
@@ -485,7 +492,7 @@ pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHan
         params.min_gap_m += MIN_GAP_STEP;
         changed = true;
     }
-    if keys.just_pressed(KeyCode::Space) {
+    if keys.just_pressed(KeyCode::KeyG) {
         params.seg_enabled = !params.seg_enabled;
         changed = true;
     }
@@ -505,11 +512,14 @@ pub fn tune_seg_params(keys: Res<ButtonInput<KeyCode>>, handle: Res<SegParamsHan
         println!(
             "rslidar: seg_enabled={} height_filter_enabled={} min_height={:.2}m th_d={:.3}m th_z={:.2}deg \
              th_d_second={:.3}m k_deg={:.3} z_weight={:.3} min_cluster_points={} min_gap_m={:.3}  \
-             (Space seg_enabled, 'h' height_filter_enabled, 'j' 'k' min_height, '[' ']' th_d, ';' ''' th_z, \
+             ('g' seg_enabled, 'h' height_filter_enabled, 'j' 'k' min_height, '[' ']' th_d, ';' ''' th_z, \
              '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
             params.seg_enabled, params.height_filter_enabled, params.min_height,
             params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
             params.min_cluster_points, params.min_gap_m
         );
+        if let Err(error) = publisher.0.put(SEG_PARAMS_KEY, params.to_bytes()).wait() {
+            eprintln!("visualization: publish seg params: {error}");
+        }
     }
 }

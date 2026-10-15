@@ -7,8 +7,8 @@ use virtual_rgbd_sensor::segmentation;
 mod visualization;
 use visualization::{
     draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, toggle_color_mode,
-    CloudChannel, CloudColorMode,
-    CostmapChannel, OrbitCamera, VizCostmap, VizPoint,
+    tune_seg_params, CloudChannel, CloudColorMode,
+    CostmapChannel, OrbitCamera, SegParamsHandle, SegParamsPublisher, VizCostmap, VizPoint,
 };
 
 use zenoh::Wait;
@@ -18,7 +18,7 @@ use bevy_points::prelude::PointsPlugin;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
 const COSTMAP_KEY: &str = "rslidar/costmap";
@@ -151,8 +151,10 @@ fn main() {
         .insert_resource(CloudChannel(Mutex::new(viz_rx)))
         .insert_resource(CostmapChannel(Mutex::new(costmap_rx)))
         .insert_resource(OrbitCamera::default())
+        .insert_resource(SegParamsHandle(Arc::new(Mutex::new(segmentation::SegParams::default()))))
+        .insert_resource(SegParamsPublisher(session.clone()))
         .init_resource::<CloudColorMode>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (toggle_color_mode, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
+        .add_systems(Update, (toggle_color_mode, tune_seg_params, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
         .run();
 }
