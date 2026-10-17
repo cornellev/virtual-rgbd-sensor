@@ -31,6 +31,7 @@ pub struct ObstacleLayer {
     max_obstacle_height: f32,
     obstacle_max_range: f32,
     obstacle_min_range: f32,
+    raytrace_min_range: f32, // deadzone of the lidar: 0.2m
     raytrace_max_range: f32,
 
     /// Cells within raytrace_max_range of the sensor; the only cells clearing
@@ -109,6 +110,7 @@ impl ObstacleLayer {
             max_obstacle_height: 3.0,
             obstacle_max_range: params.obstacle_max_range,
             obstacle_min_range: params.obstacle_min_range,
+            raytrace_min_range: params.raytrace_min_range,
             raytrace_max_range: params.raytrace_max_range,
             window,
             cell_sector,
@@ -140,7 +142,7 @@ impl ObstacleLayer {
             // raytraceFreespace clips rays longer than raytrace_max_range.
             let sector = (i % NUM_COLS) / self.cols_per_sector;
             let clear = range.min(self.raytrace_max_range);
-            if clear > self.sector_clear_range[sector] {
+            if node.range > self.raytrace_min_range && clear > self.sector_clear_range[sector] {
                 self.sector_clear_range[sector] = clear;
             }
 
