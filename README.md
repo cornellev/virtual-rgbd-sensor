@@ -15,13 +15,14 @@ In Rust! Read the documentation [here](/documentation/report.pdf).
   <source src="/demos/yay.mp4" type="video/mp4">
 </video> -->
 
-3) Ported cpp ```nav2_costmap_2d``` point cloud to costmap conversion to Rust. Implementation details are contained [here](/src/rslidar/costmap).
+3) Adopted cpp ```nav2_costmap_2d``` point cloud to costmap conversion logic for outputting occupancy grids in Rust. Implementation details are contained [here](/src/rslidar/costmap).
 ![costmap_demo](/demos/occupancy_grid.png)
 
 ## Recent Updates:
 
 |  Date     | Changelog / Update Notes |
 |:----------|:-----------|
+| 10/17/26 | - Tweaked ```costmap``` to output occupancy grids instead with ```NO_INFORMATION, LETHAL_OBSTACLE, FREE_SPACE``` elements. | 
 | 9/26/26  | - Rewrote [ros2-planning costmap_2d](https://github.com/ros-planning/navigation/tree/noetic-devel/costmap_2d/src) implementation in Rust, also integrated costmap construction directly after `RangeGraph` initialization |
 | 9/14/26  | - Integrated Two-Layer-Graph Clustering with the decoding of MSOP/DIFOP packets for optimized segmentation while point cloud are being processed. Specifically during the construction of the range and set graphs. |
 | 9/12/26   | - Tested ```rslidar_sdk_node.rs``` on online LiDAR and offline .pcap files. Also integrated simple Bevy visualizer for point clouds. | 

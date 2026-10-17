@@ -2,6 +2,10 @@ use nalgebra::Vector2;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
+// should i eventually also return like a connected components union findish structure for 
+// clusters?
+// or hashmap
+
 #[derive(Clone, Copy)]
 pub struct SegParams {
     pub seg_enabled: bool,
@@ -21,10 +25,51 @@ impl Default for SegParams {
         Self {
             seg_enabled: true,
             height_filter_enabled: false,
-            min_height: -0.3, // ceiling is a problem
-            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.1, k_deg: 1.0, z_weight: 1.0,
+            min_height: -0.6, // ceiling is a problem
+            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.05, k_deg: 1.0, z_weight: 1.0,
             min_cluster_points: 3, min_gap_m: 1.0,
         }
+    }
+}
+
+/// Zenoh key the visualizer publishes tuned `SegParams` on.
+pub const SEG_PARAMS_KEY: &str = "rslidar/seg_params";
+
+/// Wire format on `SEG_PARAMS_KEY`: seg_enabled and height_filter_enabled as
+/// one byte each, then min_height, th_d, th_z_deg, th_d_second, k_deg,
+/// z_weight (f32), min_cluster_points (u32), min_gap_m (f32), little-endian.
+impl SegParams {
+    pub const WIRE_LEN: usize = 34;
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(Self::WIRE_LEN);
+        buf.push(self.seg_enabled as u8);
+        buf.push(self.height_filter_enabled as u8);
+        for v in [self.min_height, self.th_d, self.th_z_deg, self.th_d_second, self.k_deg, self.z_weight] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf.extend_from_slice(&self.min_cluster_points.to_le_bytes());
+        buf.extend_from_slice(&self.min_gap_m.to_le_bytes());
+        buf
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() != Self::WIRE_LEN {
+            return None;
+        }
+        let f = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        Some(Self {
+            seg_enabled: b[0] != 0,
+            height_filter_enabled: b[1] != 0,
+            min_height: f(2),
+            th_d: f(6),
+            th_z_deg: f(10),
+            th_d_second: f(14),
+            k_deg: f(18),
+            z_weight: f(22),
+            min_cluster_points: u32::from_le_bytes(b[26..30].try_into().unwrap()),
+            min_gap_m: f(30),
+        })
     }
 }
 
@@ -108,6 +153,9 @@ fn equalize(values: impl Iterator<Item = usize>, bins: usize) -> Vec<u8> {
 pub const NUM_RINGS: usize = 32;
 pub const AZ_RES_CENTIDEG: i32 = 10;
 pub const NUM_COLS: usize = (36000 / AZ_RES_CENTIDEG) as usize;
+/// How far `get_vecs` looks past empty columns for a surface neighbor; 4
+/// covers the 0.4 deg firing step at 1200 rpm.
+const MAX_NEIGHBOR_COLS: usize = 4;
 
 /// 2d array representation of LiDAR divided by the vertical angles fired at each time
 /// frame and also the horizontal angles fired consecutively at different timeframes
@@ -223,6 +271,16 @@ impl RangeGraph {
         (dx * dx + dy * dy).sqrt()
     }
 
+    /// Index of the first valid cell in `ring` stepping away from `col` by
+    /// `step` (1 forward, NUM_COLS - 1 backward), within MAX_NEIGHBOR_COLS.
+    /// Above 300 rpm the firing step is wider than one column (0.2 deg at
+    /// 600 rpm, 0.4 deg at 1200 rpm), so a ring's points skip columns.
+    fn nearest_valid(&self, ring: usize, col: usize, step: usize) -> Option<usize> {
+        (1..=MAX_NEIGHBOR_COLS)
+            .map(|k| ring * NUM_COLS + (col + k * step) % NUM_COLS)
+            .find(|&idx| self.nodes[idx].valid)
+    }
+
     fn get_vecs(&mut self, idx_cur : usize, idx_pre : usize, ring : usize) -> Option<[Vector2<f32>; 2]> {
         // in one horizontal ring, this is represented by one row in G_r: after seg, we get
         // |** * ***|        |*** * ****|, 2 different pcs
@@ -230,17 +288,8 @@ impl RangeGraph {
         // idx_pre is the last cell of the previous segment (Pre Pos in Alg 1)
         // idx_cur is the first cell of the current segment
 
-        let col_pre = idx_pre % NUM_COLS;
-        let col_cur = idx_cur % NUM_COLS;
-
-        let col_pre_inner = (col_pre + NUM_COLS - 1) % NUM_COLS;
-        let idx_pre_inner = ring * NUM_COLS + col_pre_inner;
-        let col_cur_inner = (col_cur + 1) % NUM_COLS;
-        let idx_cur_inner = ring * NUM_COLS + col_cur_inner;
-
-        if !self.nodes[idx_pre_inner].valid || !self.nodes[idx_cur_inner].valid {
-            return None;
-        } 
+        let idx_pre_inner = self.nearest_valid(ring, idx_pre % NUM_COLS, NUM_COLS - 1)?;
+        let idx_cur_inner = self.nearest_valid(ring, idx_cur % NUM_COLS, 1)?;
 
         let p_pre = Vector2::<f32>::new(self.nodes[idx_pre].x, self.nodes[idx_pre].y);
         let p_pre_in = Vector2::<f32>::new(self.nodes[idx_pre_inner].x, self.nodes[idx_pre_inner].y);
@@ -260,10 +309,13 @@ impl RangeGraph {
     /// close together or actually part of the same surface
     fn should_split(&mut self, idx_cur: usize, idx_pre: usize, ring: usize, th_d: f32, th_z: f32, min_gap_m: f32) -> bool {
         let dist = self.point_dist(idx_cur, idx_pre);
-        // these are vectors depicting orientation of surface between two suspected objects
+        let avg_range = (self.nodes[idx_cur].range + self.nodes[idx_pre].range) / 2.0;
+        let far_apart = dist > th_d * avg_range / 0.3;
+        // these are vectors depicting orientation of surface between two suspected objects;
+        // without them only the distance test applies
         let (v1, v2) = match self.get_vecs(idx_cur, idx_pre, ring) {
             Some(vecs) => (vecs[0], vecs[1]),
-            None => return false,
+            None => return far_apart,
         };
 
         let angle = (v1.dot(&v2) / (v1.norm() * v2.norm())).acos();
@@ -277,12 +329,11 @@ impl RangeGraph {
             self.nodes[idx_cur].azimuth_centideg,
             self.nodes[idx_pre].azimuth_centideg,
         ) as f32 / 100.0).to_radians();
-        let avg_range = (self.nodes[idx_cur].range + self.nodes[idx_pre].range) / 2.0;
         let threshold = (th_d * avg_range * az_gap_rad);
 
         // angle is to check whether two surfaces are facing away from each other, if yes, probably
         // found 2 separate corners (not a flat surface), split into different categories
-        dist > th_d * avg_range / 0.3 || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
+        far_apart || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
     }
 
     /// given each vertical channel: which are the horizontal rows in RangeGraph split defined by each vertical angle

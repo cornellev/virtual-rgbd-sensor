@@ -47,6 +47,9 @@ const BLOCK_DURATION: f64 = BLK_TS_US / 1_000_000.0; // seconds
 const PACKET_DURATION_US: f64 = BLK_TS_US * BLOCKS_PER_PKT as f64;
 
 // per-channel firing offset within a block, in microseconds
+// actually the range graph structure directly takes in vertical channel angles from 
+// UDP packet information, maybe add a way to manually input LiDAR config angles, but 
+// not necessary
 const FIRING_TSS_US: [f64; 32] = [
     0.00, 1.73, 3.46, 5.19, 6.92, 8.65, 10.38, 12.11, 13.84, 15.57, 17.3, 19.03, 20.76, 22.49,
     24.22, 25.95, 27.68, 29.41, 31.14, 32.87, 34.6, 36.33, 38.06, 39.79, 41.52, 43.25, 44.98,
@@ -572,7 +575,9 @@ impl RsHeliosDecoder {
         // the other seg_params read once per revolution below.
         let (height_filter_enabled, min_height) = {
             let p = self.seg_params.lock().unwrap();
-            (p.height_filter_enabled, p.min_height)
+            // (p.height_filter_enabled, p.min_height)
+            (true, -0.6)
+
         };
 
         let mut azimuths = [0i32; BLOCKS_PER_PKT];
