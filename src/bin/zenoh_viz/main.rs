@@ -7,6 +7,7 @@ use virtual_rgbd_sensor::segmentation;
 mod visualization;
 use visualization::{
     draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, toggle_color_mode,
+    toggle_costmap, ShowCostmap, draw_vehicle,
     tune_seg_params, CloudChannel, CloudColorMode,
     CostmapChannel, OrbitCamera, SegParamsHandle, SegParamsPublisher, VizCostmap, VizPoint,
 };
@@ -154,7 +155,8 @@ fn main() {
         .insert_resource(SegParamsHandle(Arc::new(Mutex::new(segmentation::SegParams::default()))))
         .insert_resource(SegParamsPublisher(session.clone()))
         .init_resource::<CloudColorMode>()
+        .init_resource::<ShowCostmap>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (toggle_color_mode, tune_seg_params, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes))
+        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes, draw_vehicle))
         .run();
 }

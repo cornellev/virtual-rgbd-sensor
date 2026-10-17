@@ -19,6 +19,7 @@ use std::sync::Mutex;
 pub const NO_INFORMATION: usize = 255;
 pub const LETHAL_OBSTACLE: usize = 254;
 pub const INSCRIBED_INFLATED_OBSTACLE: usize = 253;
+pub const FREE_SPACE: usize = 0;
 
 /// one clustered point from the point cloud
 #[derive(Clone, Copy)]
@@ -137,7 +138,8 @@ fn costmap_colors() -> [[u8; 4]; 256] {
 
     lut[INSCRIBED_INFLATED_OBSTACLE] = [0, 255, 255, COSTMAP_ALPHA];
     lut[LETHAL_OBSTACLE] = [255, 0, 255, COSTMAP_ALPHA];
-    lut[NO_INFORMATION] = [0x70, 0x89, 0x86, COSTMAP_ALPHA];
+    // lut[NO_INFORMATION] = [0, 0, 0, COSTMAP_ALPHA];
+    lut[FREE_SPACE] = [255, 255, 255, COSTMAP_ALPHA];
     lut
 }
 
@@ -150,6 +152,7 @@ pub fn drain_latest_costmap(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: Query<(Entity, &CostmapPlane, &mut Transform)>,
+    show: Res<ShowCostmap>,
 ) {
     let latest = {
         let rx = channel.0.lock().unwrap();
@@ -159,6 +162,10 @@ pub fn drain_latest_costmap(
         }
         latest
     };
+    // Keep draining while hidden so the channel doesn't grow, but skip the repaint.
+    if !show.0 {
+        return;
+    }
     let Some(costmap) = latest else { return };
 
     let width = costmap.size_x as f32 * costmap.resolution;
@@ -237,6 +244,58 @@ pub fn draw_origin_axes(mut gizmos: Gizmos) {
     gizmos.arrow(Vec3::ZERO, Vec3::X * AXIS_LENGTH, Color::srgb(1.0, 0.0, 0.0));
     gizmos.arrow(Vec3::ZERO, Vec3::Y * AXIS_LENGTH, Color::srgb(0.0, 1.0, 0.0));
     gizmos.arrow(Vec3::ZERO, Vec3::Z * AXIS_LENGTH, Color::srgb(0.0, 0.4, 1.0));
+}
+
+const INCH: f32 = 0.0254;
+/// Vehicle footprint and height (length along forward x, width, height).
+const CAR_LENGTH: f32 = 43.0 * INCH;
+const CAR_WIDTH: f32 = 22.5 * INCH;
+const CAR_HEIGHT: f32 = 15.5 * INCH;
+/// LiDAR mount in the car frame, metres: x forward, y up, z lateral (the same
+/// axes as Bevy). Car frame origin is the centre of the car's footprint on the
+/// ground.
+const LIDAR_IN_CAR: Vec3 = Vec3::new(-0.355, 0.609, 0.0);
+
+/// Draws a wireframe box for the car and marks the LiDAR. The viz origin is the
+/// LiDAR, so the car frame origin sits at `-LIDAR_IN_CAR`.
+pub fn draw_vehicle(mut gizmos: Gizmos) {
+    let car_origin = -LIDAR_IN_CAR;
+    let box_center = car_origin + Vec3::Y * (CAR_HEIGHT / 2.0);
+    gizmos.cuboid(
+        Transform::from_translation(box_center)
+            .with_scale(Vec3::new(CAR_LENGTH, CAR_HEIGHT, CAR_WIDTH)),
+        Color::srgb(1.0, 0.85, 0.2),
+    );
+
+    // LiDAR marker at the origin, plus a mast down to the car's footprint.
+    let lidar_color = Color::srgb(1.0, 0.3, 0.9);
+    gizmos.sphere(Isometry3d::from_translation(Vec3::ZERO), 0.05, lidar_color);
+    gizmos.line(Vec3::ZERO, Vec3::new(0.0, car_origin.y, 0.0), lidar_color);
+}
+
+/// Whether the costmap plane is drawn; C toggles it (`toggle_costmap`).
+#[derive(Resource)]
+pub struct ShowCostmap(pub bool);
+
+impl Default for ShowCostmap {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+pub fn toggle_costmap(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut show: ResMut<ShowCostmap>,
+    mut planes: Query<&mut Visibility, With<CostmapPlane>>,
+) {
+    if keys.just_pressed(KeyCode::KeyC) {
+        show.0 = !show.0;
+        println!("visualization: costmap {}", if show.0 { "shown" } else { "hidden" });
+    }
+    let vis = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in &mut planes {
+        v.set_if_neq(vis);
+    }
 }
 
 /// How `drain_latest_cloud` colors points; Space cycles it (`toggle_color_mode`).
