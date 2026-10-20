@@ -234,7 +234,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         std::process::exit(1)
     });
 
-    let pub_costmap = publisher(&session, "rslidar/costmap").unwrap_or_else(|error| {
+    let pub_occupancy = publisher(&session, "rslidar/occupancy").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
@@ -307,7 +307,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                     let costmap_ms = costmap_start.elapsed().as_secs_f64() * 1e3;
 
                     let map = costmap.master();
-                    if let Err(error) = publish(&pub_costmap, &shm, costmap_len(map), |buf| {
+                    if let Err(error) = publish(&pub_occupancy, &shm, costmap_len(map), |buf| {
                         encode_costmap_into(buf, &cloud.header, map)
                     }) {
                         eprintln!("rslidar: publish costmap: {error}");

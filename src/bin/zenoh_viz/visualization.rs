@@ -48,10 +48,10 @@ pub struct PointCloudEntity;
 /// being mounted tilted. Only the cloud entity gets this -- the costmap plane
 /// is untouched.
 /// Roll: about the LiDAR x (forward) axis, which is Bevy +X.
-const CLOUD_ROLL_DEG: f32 = 0.0; //-10.0;
+const CLOUD_ROLL_DEG: f32 = -10.0; //-10.0;
 /// Pitch: about the LiDAR y (left) axis, which is Bevy -Z; positive lifts the
 /// forward (+x) side above the xy plane.
-const CLOUD_PITCH_DEG: f32 = 0.0; //-2.0;
+const CLOUD_PITCH_DEG: f32 = -2.0; //-2.0;
 
 /// Roll first, then pitch, both about the fixed (parent) axes. In a
 /// quaternion product the right-hand rotation is applied first.

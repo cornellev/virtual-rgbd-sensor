@@ -29,12 +29,20 @@ In Rust! Read the documentation [here](/documentation/report.pdf).
 | 9/8/26   | - Rewrote cpp ```rslidar_sdk``` with ```RSHeliosDecoder``` for RoboSense 32-channel LiDAR specifically. This is for converting offline .pcap or online MSOP/DIFOP packets to point clouds | 
 
 ## Instructions:
-Run Zenoh publisher:
+Have LiDAR perception results output via Zenoh publisher or shared memory, and listen to these
+outputs by running the visualizer. 
+
+To run Zenoh publisher:
 ```bash
-RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin rslidar_viz --release
+RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin zenoh_wrapper --release
 ```
 
-Run Zenoh subscriber:
+To run Zenoh shm:
+```bash
+RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin shm_wrapper --release
+```
+
+To run Zenoh subscriber (able to listen to publisher or shm):
 ```bash
 RUSTFLAGS="-C link-arg=-fuse-ld=gold" cargo run --bin zenoh_viz --release
 ```
@@ -51,7 +59,7 @@ A brief overview on the Zenoh pub/sub elements in ```virtual-rgbd-sensor```:
 ### Publishers:
 1) ```rslidar/points/raw```: raw ```(x, y, z, intensity)``` point cloud from RoboSense LiDAR MSOP/DIFOP packets
 2) ```rslidar/points/segmented```: segmented ```(x, y, z, cluster_id)``` point cloud from ```segmentation.rs```'s two-layer-graph clustering
-3) ```rslidar/costmap```: occupancy grid containing free space, obstacle regions, and inflation layers from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
+3) ```rslidar/costmap```: occupancy grid containing free space, obstacle regions, and no information layers (from occlusion) from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
 
 ### Subscribers:
 In ```zenoh_test.rs```, there are example point cloud and costmap subscribers in ```_points_subscriber``` and ```_costmap_subscriber```, respectively.
