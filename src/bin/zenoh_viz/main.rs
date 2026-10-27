@@ -6,10 +6,10 @@
 use virtual_rgbd_sensor::segmentation;
 mod visualization;
 use visualization::{
-    draw_origin_axes, drain_latest_cloud, drain_latest_costmap, orbit_camera, setup_scene, toggle_color_mode,
-    toggle_costmap, ShowCostmap, draw_vehicle,
+    draw_origin_axes, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, setup_scene,
+    toggle_color_mode, toggle_costmap, ShowCostmap, draw_vehicle,
     tune_seg_params, CloudChannel, CloudColorMode,
-    CostmapChannel, OrbitCamera, SegParamsHandle, SegParamsPublisher, VizCostmap, VizPoint,
+    CostmapChannel, LidarPose, OrbitCamera, PoseChannel, SegParamsHandle, SegParamsPublisher, VizCostmap, VizPoint,
 };
 
 use zenoh::Wait;
@@ -17,13 +17,24 @@ use zenoh::Wait;
 use bevy::prelude::*;
 use bevy_points::prelude::PointsPlugin;
 
+use nalgebra::{Quaternion as NQuaternion, UnitQuaternion as NUnitQuaternion, Vector3 as NVector3};
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
 const COSTMAP_KEY: &str = "rslidar/costmap";
+const POSE_KEY: &str = "rslidar/pose_world";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Fixed axis remap, lidar (REP-103: x-forward, y-left, z-up) -> Bevy
+/// (y-up, -z-forward): `(x, y, z) -> (x, z, -y)`. Verified as a -90 deg
+/// rotation about the lidar's own X axis -- same remap `drain_latest_cloud`
+/// already applies to points, pulled out here so the pose can reuse it.
+fn lidar_to_bevy_rotation() -> NUnitQuaternion<f32> {
+    NUnitQuaternion::from_axis_angle(&NVector3::x_axis(), -std::f32::consts::FRAC_PI_2)
+}
 
 /// Mirrors `encode_points`/`build_segmented_data` in rslidar_sdk_node.rs: a
 /// 16-byte header (stamp_sec: i32, stamp_nanosec: u32, width: u32,
@@ -93,9 +104,38 @@ fn decode_costmap(payload: &[u8]) -> Option<VizCostmap> {
     })
 }
 
+/// Mirrors `encode_pose` in zenoh_wrapper.rs: a 12-byte header (stamp_sec:
+/// i32, stamp_nanosec: u32, reserved: u32) followed by translation (x, y, z:
+/// f32) and rotation (qx, qy, qz, qw: f32), all little-endian, 40 bytes
+/// total. Both get the same lidar -> Bevy axis remap `drain_latest_cloud`
+/// applies to points -- a direct remap for translation, a conjugation by
+/// `lidar_to_bevy_rotation()` for the rotation (changing the axes a rotation
+/// is expressed in isn't the same as remapping a point).
+fn decode_pose(payload: &[u8]) -> Option<(Vec3, Quat)> {
+    if payload.len() < 40 {
+        return None;
+    }
+    let f32_at = |i: usize| f32::from_le_bytes(payload[i..i + 4].try_into().unwrap());
+    let t_lidar = NVector3::new(f32_at(12), f32_at(16), f32_at(20));
+    let r_lidar = NUnitQuaternion::from_quaternion(NQuaternion::new(
+        f32_at(36), f32_at(24), f32_at(28), f32_at(32),
+    ));
+
+    let p = lidar_to_bevy_rotation();
+    let t_bevy = p.transform_vector(&t_lidar);
+    let r_bevy = p * r_lidar * p.inverse();
+    let q = r_bevy.quaternion();
+
+    Some((
+        Vec3::new(t_bevy.x, t_bevy.y, t_bevy.z),
+        Quat::from_xyzw(q.i, q.j, q.k, q.w),
+    ))
+}
+
 fn main() {
     let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
     let (costmap_tx, costmap_rx) = mpsc::channel::<VizCostmap>();
+    let (pose_tx, pose_rx) = mpsc::channel::<(Vec3, Quat)>();
 
     let session = zenoh::open(zenoh::Config::default())
         .wait()
@@ -144,19 +184,37 @@ fn main() {
             std::process::exit(1)
         });
 
-    println!("zenoh_test: subscribed to {POINTS_KEY} and {COSTMAP_KEY}, waiting for frames...");
+    let _pose_subscriber = session
+        .declare_subscriber(POSE_KEY)
+        .callback(move |sample| {
+            let payload = sample.payload().to_bytes();
+            if let Some(pose) = decode_pose(&payload) {
+                let _ = pose_tx.send(pose);
+            } else {
+                eprintln!("zenoh_test: dropping malformed pose ({} bytes)", payload.len());
+            }
+        })
+        .wait()
+        .unwrap_or_else(|error| {
+            eprintln!("zenoh_test: failed to subscribe to {POSE_KEY}: {error}");
+            std::process::exit(1)
+        });
+
+    println!("zenoh_test: subscribed to {POINTS_KEY}, {COSTMAP_KEY} and {POSE_KEY}, waiting for frames...");
 
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.build().disable::<bevy::audio::AudioPlugin>())
         .add_plugins(PointsPlugin)
         .insert_resource(CloudChannel(Mutex::new(viz_rx)))
         .insert_resource(CostmapChannel(Mutex::new(costmap_rx)))
+        .insert_resource(PoseChannel(Mutex::new(pose_rx)))
         .insert_resource(OrbitCamera::default())
         .insert_resource(SegParamsHandle(Arc::new(Mutex::new(segmentation::SegParams::default()))))
         .insert_resource(SegParamsPublisher(session.clone()))
         .init_resource::<CloudColorMode>()
         .init_resource::<ShowCostmap>()
+        .init_resource::<LidarPose>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap, orbit_camera, draw_origin_axes, draw_vehicle))
+        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, draw_origin_axes, draw_vehicle))
         .run();
 }

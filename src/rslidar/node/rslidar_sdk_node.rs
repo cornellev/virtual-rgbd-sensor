@@ -4,10 +4,12 @@
 
 use crate::segmentation;
 use crate::costmap_2d;
-use crate::rslidar_math::*;
 
+use nalgebra::Vector3;
 use anyhow::Result;
-
+use crate::transform::{self, Transform, PoseBuffer};
+pub use crate::config::*;
+use crate::rslidar_math::*;
 use pcap_file::pcap::PcapReader;
 
 use std::io::ErrorKind;
@@ -21,7 +23,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // RSHELIOS protocol constants (from decoder_RSHELIOS.hpp / decoder_mech.hpp)
 // Rn this will only work for our current LiDAR, so like for Ithaca365, need new
 // config
-
 const LASER_NUM: usize = 32;
 const BLOCKS_PER_PKT: usize = 12;
 const MSOP_LEN: usize = 1248;
@@ -56,7 +57,6 @@ const FIRING_TSS_US: [f64; 32] = [
     46.71, 48.44, 50.17, 51.9, 53.63,
 ];
 
-
 fn chan_tss() -> [f64; 32] {
     let mut out = [0.0f64; 32];
     for i in 0..32 {
@@ -80,114 +80,6 @@ const DIFOP_FOV_END: usize = 34;
 const DIFOP_RETURN_MODE: usize = 300;
 const DIFOP_VERT_ANGLE_CALI: usize = 468;
 const DIFOP_HORIZ_ANGLE_CALI: usize = 564;
-
-// ---------------------------------------------------------------------------
-// config.yaml loading (only the scalar keys this script needs)
-// ---------------------------------------------------------------------------
-
-/// Finds a `<key>: <value>` line anywhere in the file and returns the value
-/// with any trailing `# comment` stripped. Good enough for config.yaml's flat
-/// key layout; this is not a general YAML parser.
-/// also like if "pcap_path" is empty, default to online LiDAR, if that exist
-/// if "pcap_path" contains a valid path, default to the offline LiDAR
-fn find_scalar(text: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}:");
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(&prefix) {
-            let value = rest.split('#').next().unwrap_or("").trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn scalar_or<T: std::str::FromStr>(text: &str, key: &str, default: T) -> T {
-    find_scalar(text, key)
-        .and_then(|v| v.parse::<T>().ok())
-        .unwrap_or(default)
-}
-
-#[derive(Clone, Debug)]
-pub struct DriverConfig {
-    pub host_address: String,
-    pub lidar_type: String,
-    pub msop_port: u16,
-    pub difop_port: u16,
-    pub user_layer_bytes: u16,
-    pub tail_layer_bytes: u16,
-    pub min_distance: f32,
-    pub max_distance: f32,
-    pub use_lidar_clock: bool,
-    pub dense_points: bool,
-    pub ts_first_point: bool,
-    pub start_angle: f32,
-    pub end_angle: f32,
-    pub wait_for_difop: bool,
-    pub frame_id: String,
-
-    // Offline playback: when `pcap_path` is set, MSOP/DIFOP packets are read
-    // from that capture instead of live UDP sockets. `pcap_rate` scales
-    // playback speed relative to the capture's own timestamps (1.0 =
-    // realtime, 2.0 = 2x speed, etc); `pcap_repeat` loops the file forever.
-    pub pcap_path: Option<String>,
-    pub pcap_rate: f32,
-    pub pcap_repeat: bool,
-}
-
-impl DriverConfig {
-    pub fn parse(text: &str) -> Self {
-        Self {
-            host_address: find_scalar(text, "host_address").unwrap_or_else(|| "0.0.0.0".into()),
-            lidar_type: find_scalar(text, "lidar_type").unwrap_or_else(|| "RSHELIOS".into()),
-            msop_port: scalar_or(text, "msop_port", 6699u16),
-            difop_port: scalar_or(text, "difop_port", 7788u16),
-            user_layer_bytes: scalar_or(text, "user_layer_bytes", 0u16),
-            tail_layer_bytes: scalar_or(text, "tail_layer_bytes", 0u16),
-            min_distance: scalar_or(text, "min_distance", 0.0f32),
-            max_distance: scalar_or(text, "max_distance", 0.0f32),
-            use_lidar_clock: scalar_or(text, "use_lidar_clock", false),
-            dense_points: scalar_or(text, "dense_points", false),
-            ts_first_point: scalar_or(text, "ts_first_point", false),
-            start_angle: scalar_or(text, "start_angle", 0.0f32),
-            end_angle: scalar_or(text, "end_angle", 360.0f32),
-            wait_for_difop: true,
-            frame_id: find_scalar(text, "ros_frame_id").unwrap_or_else(|| "rslidar".into()),
-            pcap_path: find_scalar(text, "pcap_path"),
-            pcap_rate: scalar_or(text, "pcap_rate", 1.0f32),
-            pcap_repeat: scalar_or(text, "pcap_repeat", false),
-        }
-    }
-}
-
-/// Reads the `costmap:` block of config.yaml (nav2 costmap.yaml key names);
-/// anything missing keeps CostmapParams::default().
-pub fn parse_costmap_params(text: &str) -> costmap_2d::CostmapParams {
-    let d = costmap_2d::CostmapParams::default();
-    costmap_2d::CostmapParams {
-        width: scalar_or(text, "width", d.width),
-        height: scalar_or(text, "height", d.height),
-        resolution: scalar_or(text, "resolution", d.resolution),
-        origin_x: scalar_or(text, "origin_x", d.origin_x),
-        origin_y: scalar_or(text, "origin_y", d.origin_y),
-        robot_radius: scalar_or(text, "robot_radius", d.robot_radius),
-        track_unknown_space: scalar_or(text, "track_unknown_space", d.track_unknown_space),
-        sensor_x: scalar_or(text, "sensor_x", d.sensor_x),
-        sensor_y: scalar_or(text, "sensor_y", d.sensor_y),
-        sensor_z: scalar_or(text, "sensor_z", d.sensor_z),
-        min_obstacle_height: scalar_or(text, "min_obstacle_height", d.min_obstacle_height),
-        max_obstacle_height: scalar_or(text, "max_obstacle_height", d.max_obstacle_height),
-        obstacle_max_range: scalar_or(text, "obstacle_max_range", d.obstacle_max_range),
-        obstacle_min_range: scalar_or(text, "obstacle_min_range", d.obstacle_min_range),
-        raytrace_max_range: scalar_or(text, "raytrace_max_range", d.raytrace_max_range),
-        raytrace_min_range: scalar_or(text, "raytrace_min_range", d.raytrace_min_range),
-        clearing_az_res_deg: scalar_or(text, "clearing_az_res_deg", d.clearing_az_res_deg),
-        inflation_radius: scalar_or(text, "inflation_radius", d.inflation_radius),
-        cost_scaling_factor: scalar_or(text, "cost_scaling_factor", d.cost_scaling_factor),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // channel calibration (ChanAngles in chan_angles.hpp)
@@ -364,79 +256,6 @@ fn compute_block_iter(
 }
 
 // ---------------------------------------------------------------------------
-// PointCloud2-shaped output (no ROS/ROS2 types involved)
-// ---------------------------------------------------------------------------
-
-struct Point {
-    x: f32,
-    y: f32,
-    z: f32,
-    intensity: f32,
-}
-
-pub struct Header {
-    pub stamp_sec: i32,
-    pub stamp_nanosec: u32,
-    pub frame_id: String,
-}
-
-pub struct PointField {
-    pub name: &'static str,
-    pub offset: u32,
-    pub datatype: u8, // sensor_msgs/PointField: FLOAT32 = 7
-    pub count: u32,
-}
-
-/// Field-for-field equivalent of sensor_msgs::msg::PointCloud2, with the
-/// same wire layout (little-endian data, XYZI point type — the default
-/// POINT_TYPE=XYZI build of rslidar_sdk, see rslidar_sdk/CMakeLists.txt) but
-/// without depending on rclrs/sensor_msgs at all.
-pub struct PointCloud2 {
-    pub header: Header,
-    pub height: u32,
-    pub width: u32,
-    pub fields: Vec<PointField>,
-    pub is_bigendian: bool,
-    pub point_step: u32,
-    pub row_step: u32,
-    pub data: Vec<u8>,
-    pub is_dense: bool,
-}
-
-pub const POINT_STEP: u32 = 16; // x,y,z,intensity as f32
-
-fn build_point_cloud(points: &[Point], ts: f64, frame_id: &str, dense: bool) -> PointCloud2 {
-    let width = points.len() as u32;
-    let mut data = Vec::with_capacity(points.len() * POINT_STEP as usize);
-    for p in points {
-        data.extend_from_slice(&p.x.to_le_bytes());
-        data.extend_from_slice(&p.y.to_le_bytes());
-        data.extend_from_slice(&p.z.to_le_bytes());
-        data.extend_from_slice(&p.intensity.to_le_bytes());
-    }
-
-    let stamp_sec = ts.floor() as i32;
-    let stamp_nanosec = ((ts - stamp_sec as f64) * 1e9).round() as u32;
-
-    PointCloud2 {
-        header: Header { stamp_sec, stamp_nanosec, frame_id: frame_id.to_string() },
-        height: 1,
-        width,
-        fields: vec![
-            PointField { name: "x", offset: 0, datatype: 7, count: 1 },
-            PointField { name: "y", offset: 4, datatype: 7, count: 1 },
-            PointField { name: "z", offset: 8, datatype: 7, count: 1 },
-            PointField { name: "intensity", offset: 12, datatype: 7, count: 1 },
-        ],
-        is_bigendian: false,
-        point_step: POINT_STEP,
-        row_step: POINT_STEP * width,
-        data,
-        is_dense: dense,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // decoder state machine (Decoder / DecoderMech / DecoderRSHELIOS)
 // ---------------------------------------------------------------------------
 
@@ -463,10 +282,17 @@ pub struct RsHeliosDecoder {
 
     chan_tss: [f64; 32],
     chan_azis: [f32; 32],
+
+    // tf_static lidar to robot body frame to world
+    tf_lidar_to_world: Arc<Mutex<Transform>>
 }
 
 impl RsHeliosDecoder {
-    pub fn new(cfg: &DriverConfig, seg_params: Arc<Mutex<segmentation::SegParams>>) -> Self {
+    pub fn new(
+        cfg: &DriverConfig,
+        seg_params: Arc<Mutex<segmentation::SegParams>>,
+        tf_lidar_to_world: Arc<Mutex<Transform>>
+    ) -> Self {
         Self {
             distance_section: DistanceSection::new(cfg.min_distance, cfg.max_distance),
             // start_angle/end_angle are plain degrees in config.yaml, but
@@ -490,6 +316,7 @@ impl RsHeliosDecoder {
             prev_point_ts: 0.0,
             chan_tss: chan_tss(),
             chan_azis: chan_azis(),
+            tf_lidar_to_world
         }
     }
 
@@ -626,8 +453,33 @@ impl RsHeliosDecoder {
                         );
                     }
 
+                    // Clustering above is correct in sensor-local coordinates
+                    // (it only depends on intra-frame relative geometry, which
+                    // a rigid transform wouldn't change), so the world-frame
+                    // conversion happens once here, after segmentation and
+                    // before this frame goes to any consumer.
+                    let stamp_ns = (frame_ts * 1e9).round() as i64;
+                    let transform = self.tf_lidar_to_world.lock().unwrap();
+                    for p in self.points.iter_mut() {
+                        if p.x.is_nan() {
+                            continue;
+                        }
+                        let world = transform.apply(Vector3::new(p.x, p.y, p.z));
+                        (p.x, p.y, p.z) = (world.x, world.y, world.z);
+                    }
+                    for node in finished_graph.nodes.iter_mut() {
+                        if !node.valid {
+                            continue;
+                        }
+                        let world = transform.apply(Vector3::new(node.x, node.y, node.z));
+                        (node.x, node.y, node.z) = (world.x, world.y, world.z);
+                    }
+
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
 
+                    // Identity when no pose covers this frame yet (e.g. before
+                    // the first orch/location samples arrive), matching the
+                    // no-op behavior before this field existed.
                     out.push((cloud, finished_graph));
                 }
                 self.points.clear();

@@ -1,5 +1,4 @@
 // rewriting https://github.com/ros-planning/navigation/blob/noetic-devel/costmap_2d/src/costmap_math.cpp in rust
-
 #![allow(dead_code)]
 
 use std::ops::Add;

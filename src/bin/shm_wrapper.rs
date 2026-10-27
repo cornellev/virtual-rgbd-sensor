@@ -18,11 +18,14 @@ const SHM_POOL_SIZE: usize = 32 * 1024 * 1024;
 use anyhow::Result;
 use virtual_rgbd_sensor::costmap_2d;
 use virtual_rgbd_sensor::segmentation;
+use virtual_rgbd_sensor::rslidar_math::*;
 use virtual_rgbd_sensor::rslidar_sdk_node::{
-    DriverConfig, Header, POINT_STEP, RawPacket, RsHeliosDecoder, default_config_path,
+    DriverConfig, RawPacket, RsHeliosDecoder, default_config_path,
     parse_costmap_params, spawn_packet_source,
 };
+use virtual_rgbd_sensor::transform::Transform;
 
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -265,7 +268,12 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         });
 
     let mut costmap = costmap_2d::Costmap::new(&costmap_params);
-    let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
+    // No pose source wired up here yet -- identity mount + an empty buffer
+    // means decode_msop's world-frame step is a no-op and frames stay in
+    // sensor-local coordinates, same as before this field existed.
+    let mut decoder = RsHeliosDecoder::new(
+        &cfg, seg_params, Arc::new(Mutex::new(Transform::identity()))
+    );
     let mut frame_count = 0u64;
     let image_dir = std::path::Path::new("range_images");
     std::fs::create_dir_all(image_dir).expect("create range_images dir");

@@ -329,7 +329,7 @@ impl RangeGraph {
             self.nodes[idx_cur].azimuth_centideg,
             self.nodes[idx_pre].azimuth_centideg,
         ) as f32 / 100.0).to_radians();
-        let threshold = (th_d * avg_range * az_gap_rad);
+        let threshold = th_d * avg_range * az_gap_rad;
 
         // angle is to check whether two surfaces are facing away from each other, if yes, probably
         // found 2 separate corners (not a flat surface), split into different categories

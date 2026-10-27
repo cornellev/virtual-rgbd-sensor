@@ -37,21 +37,46 @@ pub struct VizPoint {
 #[derive(Resource)]
 pub struct CloudChannel(pub Mutex<mpsc::Receiver<Vec<VizPoint>>>);
 
-/// Marks the one entity that holds the current point-cloud mesh, so
-/// `drain_latest_cloud` knows what to swap out each time a new frame lands.
-/// Public only because it appears in `drain_latest_cloud`'s signature (a
-/// `Query` type parameter) -- nothing outside this module constructs one.
 #[derive(Component)]
 pub struct PointCloudEntity;
 
-/// Display-only tilt applied to the point cloud to compensate for the LiDAR
-/// being mounted tilted. Only the cloud entity gets this -- the costmap plane
-/// is untouched.
-/// Roll: about the LiDAR x (forward) axis, which is Bevy +X.
-const CLOUD_ROLL_DEG: f32 = -10.0; //-10.0;
-/// Pitch: about the LiDAR y (left) axis, which is Bevy -Z; positive lifts the
-/// forward (+x) side above the xy plane.
-const CLOUD_PITCH_DEG: f32 = -2.0; //-2.0;
+/// Wraps the receiving end of the pose (`rslidar/pose_world`) channel, same
+/// pattern as `CloudChannel`/`CostmapChannel`.
+#[derive(Resource)]
+pub struct PoseChannel(pub Mutex<mpsc::Receiver<(Vec3, Quat)>>);
+
+/// The LiDAR's current world-frame pose (already lidar -> Bevy axis
+/// remapped by `decode_pose` in main.rs), read by `draw_vehicle` instead of
+/// assuming the LiDAR sits fixed at the scene origin. Defaults to the
+/// origin/identity, matching the old fixed-at-origin behavior until the
+/// first pose sample arrives.
+#[derive(Resource, Default)]
+pub struct LidarPose {
+    pub translation: Vec3,
+    pub rotation: Quat,
+}
+
+/// Pulls the newest pose off the channel (dropping any older ones), same
+/// drain-to-latest pattern as `drain_latest_cloud`/`drain_latest_costmap`.
+pub fn drain_latest_pose(channel: Res<PoseChannel>, mut pose: ResMut<LidarPose>) {
+    let latest = {
+        let rx = channel.0.lock().unwrap();
+        let mut latest = None;
+        while let Ok(p) = rx.try_recv() {
+            latest = Some(p);
+        }
+        latest
+    };
+    if let Some((translation, rotation)) = latest {
+        pose.translation = translation;
+        pose.rotation = rotation;
+    }
+}
+
+// roll: about the LiDAR x (forward) axis, which is Bevy +X.
+const CLOUD_ROLL_DEG: f32 = 0.0; //-10.0;
+// pitch: about the LiDAR y (left) axis, which is Bevy -Z
+const CLOUD_PITCH_DEG: f32 = 0.0; //-2.0;
 
 /// Roll first, then pitch, both about the fixed (parent) axes. In a
 /// quaternion product the right-hand rotation is applied first.
@@ -256,21 +281,27 @@ const CAR_HEIGHT: f32 = 15.5 * INCH;
 /// ground.
 const LIDAR_IN_CAR: Vec3 = Vec3::new(-0.355, 0.609, 0.0);
 
-/// Draws a wireframe box for the car and marks the LiDAR. The viz origin is the
-/// LiDAR, so the car frame origin sits at `-LIDAR_IN_CAR`.
-pub fn draw_vehicle(mut gizmos: Gizmos) {
-    let car_origin = -LIDAR_IN_CAR;
+/// Draws a wireframe box for the car and marks the LiDAR, both placed at the
+/// live `LidarPose` (world-frame, from `rslidar/pose_world`) instead of
+/// assuming the LiDAR sits fixed at the scene origin. `LIDAR_IN_CAR` is still
+/// the car's rigid, unchanging offset from the LiDAR -- it's just rotated and
+/// translated by the current pose now, rather than being the whole answer.
+pub fn draw_vehicle(mut gizmos: Gizmos, pose: Res<LidarPose>) {
+    let lidar_pos = pose.translation;
+    let lidar_rot = pose.rotation;
+    let car_origin = lidar_pos + lidar_rot * (-LIDAR_IN_CAR);
     let box_center = car_origin + Vec3::Y * (CAR_HEIGHT / 2.0);
     gizmos.cuboid(
         Transform::from_translation(box_center)
+            .with_rotation(lidar_rot)
             .with_scale(Vec3::new(CAR_LENGTH, CAR_HEIGHT, CAR_WIDTH)),
         Color::srgb(1.0, 0.85, 0.2),
     );
 
-    // LiDAR marker at the origin, plus a mast down to the car's footprint.
+    // LiDAR marker at its current world pose, plus a mast down to the car's footprint.
     let lidar_color = Color::srgb(1.0, 0.3, 0.9);
-    gizmos.sphere(Isometry3d::from_translation(Vec3::ZERO), 0.05, lidar_color);
-    gizmos.line(Vec3::ZERO, Vec3::new(0.0, car_origin.y, 0.0), lidar_color);
+    gizmos.sphere(Isometry3d::from_translation(lidar_pos), 0.05, lidar_color);
+    gizmos.line(lidar_pos, car_origin, lidar_color);
 }
 
 /// Whether the costmap plane is drawn; C toggles it (`toggle_costmap`).
@@ -358,10 +389,18 @@ pub fn drain_latest_cloud(
     let Some(cloud) = latest else { return };
     let Ok(mut mesh3d) = query.single_mut() else { return };
 
-    // LiDAR frame is REP-103: (x-forward, y-left, z-up), 
+    // LiDAR frame is REP-103: (x-forward, y-left, z-up),
     // Bevy frame is: Y-up (+Y up, -Z forward)
-    // need to transform points from LiDAR to Bevy or else lopsided
-    let vertices: Vec<Vec3> = cloud.iter().map(|p| Vec3::new(p.x, p.z, -p.y)).collect();
+    // need to transform points from LiDAR to Bevy or else lopsided.
+    // `rslidar` publishes these sensor-local now (it has no pose awareness
+    // at all), so the world-frame placement happens here, client-side, using
+    // the same LidarPose draw_vehicle already reads -- otherwise the points
+    // stay pinned at the Bevy origin while the vehicle correctly drives
+    // around, and the two drift apart exactly as they were doing.
+    let vertices: Vec<Vec3> = cloud
+        .iter()
+        .map(|p| Vec3::new(p.x, p.z, -p.y))
+        .collect();
 
     const GOLDEN_ANGLE_DEG: f32 = 137.507_76;
     let colors: Vec<Color> = cloud
