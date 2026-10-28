@@ -19,8 +19,7 @@ impl Transform {
         self.rotation * p + self.translation
     }
 
-    /// Composes `self` (outer) after `inner`, so that
-    /// `self.then(inner).apply(p) == self.apply(inner.apply(p))`.
+    //self.then(inner).apply(p) == self.apply(inner.apply(p))W.
     pub fn then(&self, inner: &Transform) -> Transform {
         Transform {
             translation: self.apply(inner.translation),
@@ -29,7 +28,7 @@ impl Transform {
     }
 }
 
-/// Stamped lidar -> world poses, ascending by stamp_ns.
+// stamped lidar -> world poses, ascending by stamp_ns.
 pub type PoseBuffer = Arc<Mutex<VecDeque<(i64, Transform)>>>;
 
 /// Pose at `stamp_ns`: lerp/SLERP between the bracketing samples, clamped to

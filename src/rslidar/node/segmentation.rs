@@ -7,14 +7,15 @@ use std::collections::VecDeque;
 // or hashmap
 
 #[derive(Clone, Copy)]
+#[allow(unused_variables)]
 pub struct SegParams {
     pub seg_enabled: bool,
     pub height_filter_enabled: bool,
     pub min_height: f32,
     pub th_d: f32,
     pub th_z_deg: f32,
-    pub th_d_second: f32,
-    pub k_deg: f32,
+    pub th_v_base: f32,
+    pub th_v_slope: f32,
     pub z_weight: f32,
     pub min_cluster_points: u32,
     pub min_gap_m: f32,
@@ -26,7 +27,7 @@ impl Default for SegParams {
             seg_enabled: true,
             height_filter_enabled: false,
             min_height: -0.6, // ceiling is a problem
-            th_d: 0.01, th_z_deg: 15.0, th_d_second: 0.05, k_deg: 1.0, z_weight: 1.0,
+            th_d: 0.01, th_z_deg: 15.0, th_v_base: 0.25, th_v_slope: 0.01, z_weight: 1.0,
             min_cluster_points: 3, min_gap_m: 1.0,
         }
     }
@@ -36,7 +37,7 @@ impl Default for SegParams {
 pub const SEG_PARAMS_KEY: &str = "rslidar/seg_params";
 
 /// Wire format on `SEG_PARAMS_KEY`: seg_enabled and height_filter_enabled as
-/// one byte each, then min_height, th_d, th_z_deg, th_d_second, k_deg,
+/// one byte each, then min_height, th_d, th_z_deg, th_v_base (m), th_v_slope (m/m),
 /// z_weight (f32), min_cluster_points (u32), min_gap_m (f32), little-endian.
 impl SegParams {
     pub const WIRE_LEN: usize = 34;
@@ -45,7 +46,7 @@ impl SegParams {
         let mut buf = Vec::with_capacity(Self::WIRE_LEN);
         buf.push(self.seg_enabled as u8);
         buf.push(self.height_filter_enabled as u8);
-        for v in [self.min_height, self.th_d, self.th_z_deg, self.th_d_second, self.k_deg, self.z_weight] {
+        for v in [self.min_height, self.th_d, self.th_z_deg, self.th_v_base, self.th_v_slope, self.z_weight] {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         buf.extend_from_slice(&self.min_cluster_points.to_le_bytes());
@@ -64,8 +65,8 @@ impl SegParams {
             min_height: f(2),
             th_d: f(6),
             th_z_deg: f(10),
-            th_d_second: f(14),
-            k_deg: f(18),
+            th_v_base: f(14),
+            th_v_slope: f(18),
             z_weight: f(22),
             min_cluster_points: u32::from_le_bytes(b[26..30].try_into().unwrap()),
             min_gap_m: f(30),
@@ -109,16 +110,17 @@ pub struct GraphNode {
     pub range : f32,
     pub x_mean : f32,
     pub y_mean : f32,
-    // Unlike x_mean/y_mean, nothing read this until node_dist started
-    // folding in a weighted dz -- two_layer_seg.cpp's GraphNode never had
-    // one either, since its nodeDist/getNeighbors were XY-only too.
     pub z_mean : f32,
     pub alpha : i32,
     pub cluster : i32,
     pub start_pos : i32,
     pub end_pos : i32,
     // indices into G_r that belong to this node
-    pub members : Vec<i32>
+    pub members : Vec<i32>,
+    // (bin = col / BIN_COLS, x_sum, y_sum, count), ascending by bin
+    // binning horizontal segments cuz need better resolution for
+    // vertical adjacency cmps >:(, walls are annoying
+    pub bins : Vec<(u16, f32, f32, u32)>
 }
 
 impl GraphNode {
@@ -132,22 +134,10 @@ impl GraphNode {
             cluster : -1,
             start_pos : -1,
             end_pos : -1,
-            members : Vec::new()
+            members : Vec::new(),
+            bins : Vec::new()
         }
     }
-}
-
-/// Histogram-equalization lookup table: maps each value in `0..bins` to `1..=255`
-/// by its rank among the nonzero `values` (0 is treated as "no data" and ignored).
-fn equalize(values: impl Iterator<Item = usize>, bins: usize) -> Vec<u8> {
-    let mut hist = vec![0usize; bins];
-    for v in values.filter(|&v| v > 0) { hist[v] += 1; }
-    let total = hist.iter().sum::<usize>().max(1);
-    let mut acc = 0;
-    hist.iter().map(|&count| {
-        acc += count;
-        (1 + 254 * acc / total) as u8
-    }).collect()
 }
 
 pub const NUM_RINGS: usize = 32;
@@ -156,6 +146,8 @@ pub const NUM_COLS: usize = (36000 / AZ_RES_CENTIDEG) as usize;
 /// How far `get_vecs` looks past empty columns for a surface neighbor; 4
 /// covers the 0.4 deg firing step at 1200 rpm.
 const MAX_NEIGHBOR_COLS: usize = 4;
+// like around 20 points per bin, 4 deg
+const BIN_COLS: usize = 40;
 
 /// 2d array representation of LiDAR divided by the vertical angles fired at each time
 /// frame and also the horizontal angles fired consecutively at different timeframes
@@ -177,18 +169,14 @@ impl RangeGraph {
         }
     }
 
-    /// Inserts one decoded point into its `(ring, column)` cell. `azimuth_centideg`
-    /// must already be normalized to `[0, 36000)` (see `azimuth_round` at the
-    /// decode-loop call site). If another point already landed in this cell
-    /// this revolution, keeps whichever is closer to the sensor -- mirrors
-    /// `constructRangeGraph`'s `if (!G_r[idx].valid || r < G_r[idx].range)`.
+    // inserts one decoded point into its `(ring, column)` cell
+    // if another point already landed in this cell
+    // this revolution, keeps whichever is closer to the sensor
     pub fn insert(
         &mut self,
         ring: usize,
         azimuth_centideg: i32,
-        x: f32,
-        y: f32,
-        z: f32,
+        x: f32, y: f32, z: f32,
         intensity: f32,
         range: f32,
         point_idx: i32,
@@ -199,65 +187,6 @@ impl RangeGraph {
         if !cell.valid || range < cell.range {
             *cell = RangeNode { x, y, z, intensity, range, azimuth_centideg, point_idx, valid: true, alpha: -1, beta: -1 };
         }
-    }
-
-    /// Writes images of columns [col_start, col_end) (wrapping past 360) into `dir`:
-    /// - `range_NNNNN.png` (16-bit, mm) and `intensity_NNNNN.png` (8-bit, raw): data
-    ///   for tracking; 0 means no return.
-    /// - `preview/range_NNNNN.png`, `preview/intensity_NNNNN.png`: contrast-stretched
-    ///   8-bit copies, rows repeated PREVIEW_ROW_SCALE times so they're viewable.
-    pub fn write_images(&self, dir: &std::path::Path, frame: u64,
-                        col_start: usize, col_end: usize) -> image::ImageResult<()> {
-        use image::{GrayImage, ImageBuffer, Luma, imageops::{self, FilterType}};
-        const PREVIEW_ROW_SCALE: u32 = 8;
-
-        let width = (col_end + NUM_COLS - col_start) % NUM_COLS;
-        let width = if width == 0 { NUM_COLS } else { width };
-        let (w, h) = (width as u32, NUM_RINGS as u32);
-        let mut range_img: ImageBuffer<Luma<u16>, Vec<u16>> = ImageBuffer::new(w, h);
-        let mut inten_img = GrayImage::new(w, h);
-
-        // top row = highest beam; columns flipped so left->right matches a camera
-        for (row, ring) in (0..NUM_RINGS).rev().enumerate() {
-            for c in 0..width {
-                let n = &self.nodes[ring * NUM_COLS + (col_start + width - 1 - c) % NUM_COLS];
-                if n.valid {
-                    let r_mm = (n.range * 1000.0).clamp(1.0, 65535.0) as u16;
-                    range_img.put_pixel(c as u32, row as u32, Luma([r_mm]));
-                    inten_img.put_pixel(c as u32, row as u32, Luma([n.intensity.min(255.0) as u8]));
-                }
-            }
-        }
-        range_img.save(dir.join(format!("range.png")))?;
-        inten_img.save(dir.join(format!("intensity.png")))?;
-
-        // previews: histogram-equalized over valid pixels (both channels are heavily
-        // skewed -- most intensities are < 10, most ranges are a few metres);
-        // near = bright, no return = black
-        let range_eq = equalize(range_img.pixels().map(|p| p[0] as usize), 1 << 16);
-        // (intensity is shifted by 1 so a real 0-intensity return isn't dropped as "no return")
-        let inten_eq = equalize(
-            inten_img.pixels().zip(range_img.pixels())
-                .filter(|(_, r)| r[0] > 0).map(|(i, _)| i[0] as usize + 1),
-            257,
-        );
-        let range_view = GrayImage::from_fn(w, h, |x, y| {
-            let r = range_img.get_pixel(x, y)[0] as usize;
-            Luma([if r == 0 { 0 } else { 256 - range_eq[r] as u16 } as u8])
-        });
-        let inten_view = GrayImage::from_fn(w, h, |x, y| {
-            // range is clamped >= 1 mm for valid cells, so it doubles as the validity mask
-            let valid = range_img.get_pixel(x, y)[0] > 0;
-            Luma([if valid { inten_eq[inten_img.get_pixel(x, y)[0] as usize + 1] } else { 0 }])
-        });
-
-        let preview_dir = dir.join("preview");
-        std::fs::create_dir_all(&preview_dir)?;
-        for (name, img) in [("range", range_view), ("intensity", inten_view)] {
-            imageops::resize(&img, w, h * PREVIEW_ROW_SCALE, FilterType::Nearest)
-                .save(preview_dir.join(format!("{name}.png")))?;
-        }
-        Ok(())
     }
 
     fn azimuth_gap_centideg(a: i32, b: i32) -> i32 {
@@ -271,10 +200,8 @@ impl RangeGraph {
         (dx * dx + dy * dy).sqrt()
     }
 
-    /// Index of the first valid cell in `ring` stepping away from `col` by
-    /// `step` (1 forward, NUM_COLS - 1 backward), within MAX_NEIGHBOR_COLS.
-    /// Above 300 rpm the firing step is wider than one column (0.2 deg at
-    /// 600 rpm, 0.4 deg at 1200 rpm), so a ring's points skip columns.
+    // Index of the first valid cell in `ring` stepping away from `col` by
+    // `step` (1 forward, NUM_COLS - 1 backward), within MAX_NEIGHBOR_COLS
     fn nearest_valid(&self, ring: usize, col: usize, step: usize) -> Option<usize> {
         (1..=MAX_NEIGHBOR_COLS)
             .map(|k| ring * NUM_COLS + (col + k * step) % NUM_COLS)
@@ -336,8 +263,8 @@ impl RangeGraph {
         far_apart || (angle < th_z && v_mo.dot(&v_anglebisector) > 0.0)
     }
 
-    /// given each vertical channel: which are the horizontal rows in RangeGraph split defined by each vertical angle
-    /// of the LiDAR, segment horizontally to form SetGraph
+    // given each vertical channel: which are the horizontal rows in RangeGraph split defined by each vertical angle
+    // of the LiDAR, segment horizontally to form SetGraph
     pub fn first_segmentation(&mut self, set_graph: &mut SetGraph, th_d : f32, th_z : f32, min_gap_m : f32) {
         set_graph.clear();
 
@@ -376,6 +303,15 @@ impl RangeGraph {
                 node.x_mean += cell.x;
                 node.y_mean += cell.y;
                 node.z_mean += cell.z;
+                let bin = (j / BIN_COLS) as u16;
+                match node.bins.last_mut() {
+                    Some(last) if last.0 == bin => {
+                        last.1 += cell.x;
+                        last.2 += cell.y;
+                        last.3 += 1;
+                    }
+                    _ => node.bins.push((bin, cell.x, cell.y, 1)),
+                }
                 let j_i32 = j as i32;
                 if node.start_pos == -1 || j_i32 < node.start_pos {
                     node.start_pos = j_i32;
@@ -408,6 +344,7 @@ impl RangeGraph {
                         first_node.start_pos = first_node.start_pos.min(last_node.start_pos);
                         first_node.end_pos = first_node.end_pos.max(last_node.end_pos);
                         first_node.members.extend(last_node.members);
+                        first_node.bins.extend(last_node.bins);
                     }
                 }
             }
@@ -435,43 +372,45 @@ impl SetGraph {
         Self { nodes: (0..NUM_RINGS).map(|_| Vec::new()).collect() }
     }
 
-    /// Drops every ring back to empty, ready to be rebuilt by
-    /// `RangeGraph::first_segmentation`. `Vec::new()` (in `new()`) and this
-    /// both produce the same "NUM_RINGS empty rows" state; which one you
-    /// reach for is just whether you already have a `SetGraph` to reuse.
     pub fn clear(&mut self) {
         for ring in self.nodes.iter_mut() {
             ring.clear();
         }
     }
 
-    fn node_dist(a: &GraphNode, b: &GraphNode) -> f32 {
-        let dx = a.x_mean - b.x_mean;
-        let dy = a.y_mean - b.y_mean;
-        (dx * dx + dy * dy).sqrt()
+    // xy distance between two ring segments using their azimuth bins: the
+    // closest pair of bin means in shared bins
+    fn bin_dist(a: &GraphNode, b: &GraphNode) -> f32 {
+        let (mut i, mut j) = (0, 0);
+        let mut shared = f32::INFINITY;
+        let (mut nearest_gap, mut nearest) = (u16::MAX, f32::INFINITY);
+        while i < a.bins.len() && j < b.bins.len() {
+            let (ba, xa, ya, na) = a.bins[i];
+            let (bb, xb, yb, nb) = b.bins[j];
+            let dx = xa / na as f32 - xb / nb as f32;
+            let dy = ya / na as f32 - yb / nb as f32;
+            let d = (dx * dx + dy * dy).sqrt();
+            if ba == bb {
+                shared = shared.min(d);
+                i += 1;
+                j += 1;
+            } else {
+                let gap = ba.abs_diff(bb);
+                if gap < nearest_gap || (gap == nearest_gap && d < nearest) {
+                    (nearest_gap, nearest) = (gap, d);
+                }
+                if ba < bb { i += 1 } else { j += 1 }
+            }
+        }
+        if shared.is_finite() { shared } else { nearest }
     }
 
-    /// Cross-ring merge threshold, shared by `get_neighbors`'s candidate
-    /// pre-filter and `second_segmentation`'s actual accept check -- these
-    /// used to be two independently hand-written copies of the same formula
-    /// that drifted apart (the pre-filter ended up ~10x stricter than the
-    /// accept check at typical ranges), silently dropping real candidates
-    /// before the looser accept check ever got a chance to judge them.
-    /// Sharing one function makes that kind of drift impossible.
-    fn cross_ring_threshold(th_d_second: f32, min_gap_m: f32, min_range: f32) -> f32 {
-        th_d_second * (min_range / 0.4).max(min_gap_m) * min_range.ln().max(1.0)
+    // th_v_base + th_v_slope * range
+    fn cross_ring_threshold(th_v_base: f32, th_v_slope: f32, min_range: f32) -> f32 {
+        th_v_base + th_v_slope * min_range
     }
 
-    fn get_neighbors(
-        &self,
-        ri: usize,
-        ci: usize,
-        th_d_second: f32,
-        k_deg: f32,
-        z_weight: f32,
-        min_gap_m: f32,
-        ring_vert_deg: &[f32; NUM_RINGS],
-    ) -> Vec<(usize, usize, &'static str)> {
+    fn get_neighbors(&self, ri: usize, ci: usize, th_v_base: f32, th_v_slope: f32) -> Vec<(usize, usize)> {
         let mut nbrs = Vec::new();
         let cur = &self.nodes[ri][ci];
 
@@ -483,16 +422,11 @@ impl SetGraph {
             }
             let rn = rn as usize;
 
-            // Threshold/dist depend on this specific candidate's range (via
-            // cross_ring_threshold's `expected`), not just the ring pair, so
-            // this can't be hoisted out of the loop the way a flat threshold
-            // could.
-            let try_push = |cn: usize, nbrs: &mut Vec<(usize, usize, &'static str)>, adjc_type: &'static str| {
+            let try_push = |cn: usize, nbrs: &mut Vec<(usize, usize)>| {
                 let cand = &self.nodes[rn][cn];
-                let dist = Self::node_dist(cur, cand);
-                let threshold = Self::cross_ring_threshold(th_d_second, min_gap_m, cur.range.min(cand.range));
-                if dist < threshold {
-                    nbrs.push((rn, cn, adjc_type));
+                let threshold = Self::cross_ring_threshold(th_v_base, th_v_slope, cur.range.min(cand.range));
+                if Self::bin_dist(cur, cand) < threshold {
+                    nbrs.push((rn, cn));
                 }
             };
 
@@ -510,30 +444,27 @@ impl SetGraph {
                     first_after = Some(cn);
                     break;
                 }
-                try_push(cn, &mut nbrs, "vertical");
+                try_push(cn, &mut nbrs);
             }
             if let Some(cn) = last_before {
-                try_push(cn, &mut nbrs, "horizontal");
+                try_push(cn, &mut nbrs);
             }
             if let Some(cn) = first_after {
-                try_push(cn, &mut nbrs, "horizontal");
+                try_push(cn, &mut nbrs);
             }
         }
         nbrs
     }
 
-    /// this takes the horizontally segmented range graph -> set graph and 
-    /// then runs BFS given vertically adjacent neighbors to merge vertically
-    /// and rings
+    // this takes the horizontally segmented range graph -> set graph and 
+    // then runs BFS given vertically adjacent neighbors to merge vertically
+    // and rings
     pub fn second_segmentation(
         &mut self,
         g_r: &mut RangeGraph,
-        th_d_second: f32,
-        k_deg: f32,
-        z_weight: f32,
+        th_v_base: f32,
+        th_v_slope: f32,
         min_cluster_points: u32,
-        min_gap_m: f32,
-        ring_vert_deg: &[f32; NUM_RINGS],
     ) -> i32 {
         for i in 0..NUM_RINGS {
             for n in self.nodes[i].iter_mut() {
@@ -554,7 +485,7 @@ impl SetGraph {
                 self.nodes[i][j].cluster = l_cnt;
 
                 while let Some((ri, ci)) = q.pop_front() {
-                    for (rn, cn, adjc_type) in self.get_neighbors(ri, ci, th_d_second, k_deg, z_weight, min_gap_m, ring_vert_deg) {
+                    for (rn, cn) in self.get_neighbors(ri, ci, th_v_base, th_v_slope) {
                         if self.nodes[rn][cn].cluster != -1 {
                             continue;
                         }

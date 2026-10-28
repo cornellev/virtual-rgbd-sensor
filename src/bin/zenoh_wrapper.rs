@@ -6,11 +6,9 @@ use zenoh::{
     qos::CongestionControl,
     // add shared memory import here, the goal is that instead of publisher we do SHM
     // only one version of rangegraph & costmap is shared across anybody who wants it
-    shm::{
-        AllocAlignment, GarbageCollect, MemoryLayout, PosixShmProviderBackend, ShmProvider,
-        ShmProviderBuilder, ZShmMut,
-    },
+    shm::{PosixShmProviderBackend, ShmProvider},
 };
+
 use nalgebra::{Quaternion as NQuaternion, UnitQuaternion as NUnitQuaternion, Vector3 as NVector3};
 
 type RslidarShmProvider = ShmProvider<PosixShmProviderBackend>;
@@ -21,6 +19,8 @@ const POSE_BUFFER_LEN: usize = 1024;
 use anyhow::Result;
 use virtual_rgbd_sensor::costmap_2d;
 use virtual_rgbd_sensor::segmentation;
+use virtual_rgbd_sensor::visualize::*;
+use virtual_rgbd_sensor::tracking::{aggregate_clusters, relabel, Tracker};
 use virtual_rgbd_sensor::rslidar_math::*;
 use virtual_rgbd_sensor::rslidar_sdk_node::{
     DriverConfig, RawPacket, RsHeliosDecoder, default_config_path,
@@ -251,6 +251,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
 
     let mut costmap = costmap_2d::Costmap::new(&costmap_params);
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
+    let mut tracker = Tracker::new(0.5, 5);
     let mut frame_count = 0u64;
     let image_dir = std::path::Path::new("range_images");
     std::fs::create_dir_all(image_dir).expect("create range_images dir");
@@ -268,6 +269,9 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                     let tf = interpolate_pose(&poses.lock().unwrap(), stamp_ns)
                         .unwrap_or_else(Transform::identity);
                     to_world(&tf, &mut cloud.data, &mut range_graph);
+
+                    let ids = tracker.update(&aggregate_clusters(&range_graph));
+                    relabel(&mut range_graph, &ids);
                     if let Err(error) = pub_pose_frame.put(encode_pose(&cloud.header, &tf)).wait() {
                         eprintln!("rslidar: publish frame pose: {error}");
                     }
@@ -314,7 +318,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         .wait() {
                         eprintln!("rslidar: publish range graph: {error}");
                     }
-                    if let Err(error) = range_graph.write_images(image_dir, frame_count, 0, segmentation::NUM_COLS) {
+                    if let Err(error) = write_images(&range_graph, image_dir, frame_count, 0, segmentation::NUM_COLS) {
                         eprintln!("rslidar: write range images: {error}");
                     }
                     println!("output (costmap update {costmap_ms:.2} ms)")

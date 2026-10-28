@@ -278,8 +278,6 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
             RawPacket::Difop(buf) => decoder.decode_difop(&buf),
             RawPacket::Msop(buf) => {
                 for (cloud, range_graph) in decoder.decode_msop(&buf) {
-                    frame_count += 1;
-
                     let mut point_cluster = vec![-1i32; cloud.width as usize];
                     for node in range_graph.nodes.iter() {
                         if node.valid && node.point_idx >= 0 {

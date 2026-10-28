@@ -428,18 +428,13 @@ impl RsHeliosDecoder {
                 let mut finished_graph =
                     std::mem::replace(&mut self.range_graph, segmentation::RangeGraph::new());
                 if !self.points.is_empty() {
-                    // let iter_start = Instant::now();
-
-                    let (seg_enabled, th_d, th_z_deg, th_d_second, k_deg, z_weight, min_cluster_points, min_gap_m) = {
+                    let (seg_enabled, th_d, th_z_deg, th_v_base, th_v_slope, min_cluster_points, min_gap_m) = {
                         let p = self.seg_params.lock().unwrap();
-                        (p.seg_enabled, p.th_d, p.th_z_deg, p.th_d_second, p.k_deg, p.z_weight, p.min_cluster_points, p.min_gap_m)
+                        (p.seg_enabled, p.th_d, p.th_z_deg, p.th_v_base, p.th_v_slope, p.min_cluster_points, p.min_gap_m)
                     };
                     if seg_enabled {
                         finished_graph.first_segmentation(&mut self.set_graph, th_d, th_z_deg.to_radians(), min_gap_m);
-                        self.set_graph.second_segmentation(
-                            &mut finished_graph, th_d_second, k_deg, z_weight, min_cluster_points, min_gap_m,
-                            &self.ring_vert_deg,
-                        );
+                        self.set_graph.second_segmentation(&mut finished_graph, th_v_base, th_v_slope, min_cluster_points);
                     }
 
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
@@ -532,10 +527,7 @@ fn spawn_udp_reader(sock: UdpSocket, tag: fn(Vec<u8>) -> RawPacket, tx: mpsc::Se
     });
 }
 
-/// Parses an Ethernet (II) frame -- optionally carrying one 802.1Q VLAN tag
-/// -- down to its UDP payload. Returns the UDP destination port and payload
-/// slice, or `None` if the frame isn't IPv4/UDP. This is all a pcap capture
-/// of LiDAR traffic ever contains, so it's not a general packet parser.
+// parses an ethernet frame -> udp payload
 fn udp_payload_from_eth_frame(frame: &[u8]) -> Option<(u16, &[u8])> {
     if frame.len() < 14 {
         return None;
@@ -569,11 +561,7 @@ fn udp_payload_from_eth_frame(frame: &[u8]) -> Option<(u16, &[u8])> {
     Some((dst_port, &udp[8..]))
 }
 
-/// Replays a pcap capture of MSOP/DIFOP traffic as if it were arriving live:
-/// packets are parsed down to their UDP payload, classified by destination
-/// port, and paced using the capture's own timestamps (scaled by `rate`) so
-/// the decoder's frame-splitting and timing logic behaves the same as it
-/// would against a real LiDAR.
+// replays a pcap capture
 fn spawn_pcap_reader(
     path: String,
     msop_port: u16,

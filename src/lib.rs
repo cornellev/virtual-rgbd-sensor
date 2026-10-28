@@ -12,6 +12,9 @@ pub mod tracking;
 #[path = "rslidar/node/transform.rs"]
 pub mod transform;
 
+#[path = "rslidar/node/visualize.rs"]
+pub mod visualize;
+
 #[path = "rslidar/node/config.rs"]
 pub mod config;
 

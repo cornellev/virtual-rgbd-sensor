@@ -524,8 +524,8 @@ pub fn tune_seg_params(
 ) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;
-    const TH_D_SECOND_STEP: f32 = 0.01;
-    const K_DEG_STEP: f32 = 0.05;
+    const TH_V_BASE_STEP: f32 = 0.01;
+    const TH_V_SLOPE_STEP: f32 = 0.002;
     const Z_WEIGHT_STEP: f32 = 0.05;
     const MIN_CLUSTER_STEP: u32 = 1;
     const MIN_GAP_STEP: f32 = 0.01;
@@ -551,19 +551,19 @@ pub fn tune_seg_params(
         changed = true;
     }
     if keys.just_pressed(KeyCode::Minus) {
-        params.th_d_second = (params.th_d_second - TH_D_SECOND_STEP).max(0.01);
+        params.th_v_base = (params.th_v_base - TH_V_BASE_STEP).max(0.01);
         changed = true;
     }
     if keys.just_pressed(KeyCode::Equal) {
-        params.th_d_second += TH_D_SECOND_STEP;
+        params.th_v_base += TH_V_BASE_STEP;
         changed = true;
     }
     if keys.just_pressed(KeyCode::Comma) {
-        params.k_deg = (params.k_deg - K_DEG_STEP).max(0.0);
+        params.th_v_slope = (params.th_v_slope - TH_V_SLOPE_STEP).max(0.0);
         changed = true;
     }
     if keys.just_pressed(KeyCode::Period) {
-        params.k_deg += K_DEG_STEP;
+        params.th_v_slope += TH_V_SLOPE_STEP;
         changed = true;
     }
     if keys.just_pressed(KeyCode::Backquote) {
@@ -609,11 +609,11 @@ pub fn tune_seg_params(
     if changed {
         println!(
             "rslidar: seg_enabled={} height_filter_enabled={} min_height={:.2}m th_d={:.3}m th_z={:.2}deg \
-             th_d_second={:.3}m k_deg={:.3} z_weight={:.3} min_cluster_points={} min_gap_m={:.3}  \
+             th_v_base={:.3}m th_v_slope={:.3} z_weight={:.3} min_cluster_points={} min_gap_m={:.3}  \
              ('g' seg_enabled, 'h' height_filter_enabled, 'j' 'k' min_height, '[' ']' th_d, ';' ''' th_z, \
-             '-' '=' th_d_second, ',' '.' k_deg, '`' '\\' z_weight, '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
+             '-' '=' th_v_base, ',' '.' th_v_slope, '`' '\\' z_weight, '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
             params.seg_enabled, params.height_filter_enabled, params.min_height,
-            params.th_d, params.th_z_deg, params.th_d_second, params.k_deg, params.z_weight,
+            params.th_d, params.th_z_deg, params.th_v_base, params.th_v_slope, params.z_weight,
             params.min_cluster_points, params.min_gap_m
         );
         if let Err(error) = publisher.0.put(SEG_PARAMS_KEY, params.to_bytes()).wait() {
