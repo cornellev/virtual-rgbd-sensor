@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
 const COSTMAP_KEY: &str = "rslidar/costmap";
-const POSE_KEY: &str = "rslidar/pose_world";
+const POSE_KEY: &str = "rslidar/pose_frame";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Fixed axis remap, lidar (REP-103: x-forward, y-left, z-up) -> Bevy
@@ -104,7 +104,9 @@ fn decode_costmap(payload: &[u8]) -> Option<VizCostmap> {
     })
 }
 
-/// Mirrors `encode_pose` in zenoh_wrapper.rs: a 12-byte header (stamp_sec:
+/// The pose zenoh_wrapper applied to the latest cloud, so the vehicle is
+/// drawn at the same instant as the points. Mirrors `encode_pose` in
+/// zenoh_wrapper.rs: a 12-byte header (stamp_sec:
 /// i32, stamp_nanosec: u32, reserved: u32) followed by translation (x, y, z:
 /// f32) and rotation (qx, qy, qz, qw: f32), all little-endian, 40 bytes
 /// total. Both get the same lidar -> Bevy axis remap `drain_latest_cloud`

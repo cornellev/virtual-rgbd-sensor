@@ -46,6 +46,9 @@ pub struct DriverConfig {
     pub end_angle: f32,
     pub wait_for_difop: bool,
     pub frame_id: String,
+    // TEMPORARY: cev-sim encodes MSOP azimuth counterclockwise (hardware is
+    // clockwise), so its scans come out mirrored in y. Remove once fixed upstream.
+    pub mirror_y: bool,
 
     // Offline playback: when `pcap_path` is set, MSOP/DIFOP packets are read
     // from that capture instead of live UDP sockets. `pcap_rate` scales
@@ -74,6 +77,7 @@ impl DriverConfig {
             end_angle: scalar_or(text, "end_angle", 360.0f32),
             wait_for_difop: true,
             frame_id: find_scalar(text, "ros_frame_id").unwrap_or_else(|| "rslidar".into()),
+            mirror_y: scalar_or(text, "mirror_y", false),
             pcap_path: find_scalar(text, "pcap_path"),
             pcap_rate: scalar_or(text, "pcap_rate", 1.0f32),
             pcap_repeat: scalar_or(text, "pcap_repeat", false),

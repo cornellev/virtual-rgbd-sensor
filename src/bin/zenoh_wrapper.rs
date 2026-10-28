@@ -16,6 +16,7 @@ use nalgebra::{Quaternion as NQuaternion, UnitQuaternion as NUnitQuaternion, Vec
 type RslidarShmProvider = ShmProvider<PosixShmProviderBackend>;
 const SHM_POOL_SIZE: usize = 64 * 1024 * 1024;
 const POSE_KEY: &str = "rslidar/pose_world";
+const POSE_BUFFER_LEN: usize = 1024;
 
 use anyhow::Result;
 use virtual_rgbd_sensor::costmap_2d;
@@ -25,7 +26,7 @@ use virtual_rgbd_sensor::rslidar_sdk_node::{
     DriverConfig, RawPacket, RsHeliosDecoder, default_config_path,
     parse_costmap_params, spawn_packet_source,
 };
-use virtual_rgbd_sensor::transform::Transform;
+use virtual_rgbd_sensor::transform::{interpolate_pose, PoseBuffer, Transform};
 
 use std::collections::VecDeque;
 use std::sync::mpsc;
@@ -44,41 +45,10 @@ fn publisher<'a>(session: &'a zenoh::Session, key: &'static str) -> Result<Publi
         .map_err(|error| anyhow::anyhow!("declare {key} publisher: {error}"))
 }
 
-fn create_shm_provider(capacity: usize) -> Result<RslidarShmProvider> {
-    let layout = MemoryLayout::new(capacity, AllocAlignment::ALIGN_8_BYTES)?;
-    ShmProviderBuilder::default_backend(layout)
-        .wait()
-        .map_err(|error| anyhow::anyhow!("create Zenoh SHM provider: {error}"))
-}
 
-fn allocate_frame(provider: &RslidarShmProvider, len: usize) -> Result<ZShmMut> {
-    let layout = MemoryLayout::new(len, AllocAlignment::ALIGN_8_BYTES)?;
-    provider
-        .alloc(layout)
-        .with_policy::<GarbageCollect>()
-        .wait()
-        .map_err(|error| anyhow::anyhow!("allocate Zenoh SHM frame: {error}"))
-}
-
-fn publish(
-    publisher: &Publisher<'_>,
-    provider: &RslidarShmProvider,
-    len: usize,
-    fill: impl FnOnce(&mut [u8]),
-) -> Result<()> {
-    let mut frame = allocate_frame(provider, len)?;
-    fill(&mut frame);
-    publisher
-        .put(frame)
-        .wait()
-        .map_err(|error| anyhow::anyhow!("publish frame: {error}"))
-}
-
-/// Wire format published on both point-cloud keys: a 16-byte header
-/// (stamp_sec: i32, stamp_nanosec: u32, width: u32, point_step: u32, all
-/// little-endian) followed by `width * point_step` bytes of point data.
-/// `frame_id` isn't included since it's constant per key/session, not
-/// per-frame.
+// encode points as bits: header: u16 + 
+// stamp_sec: i32 + stamp_nanosec: u32 + width: u32 + point_step: u32 + 
+// data: width * point_step`
 fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     let width = data.len() as u32 / point_step;
     let mut buf = Vec::with_capacity(16 + data.len());
@@ -92,11 +62,9 @@ fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
 
 const RANGEGRAPH_RECORD_LEN: usize = 24; // x, y, z, intensity, range (f32) + cluster_id (i32)
 
-/// Wire format published on `rslidar/points/rangegraph`: a 32-byte header
-/// (stamp_sec: i32, stamp_nanosec: u32, rows: u32, cols: u32,
-/// az_res_centideg: u32, record_len: u32, reserved: u64, all little-endian)
-/// followed by `rows * cols` records indexed `ring * cols + col`. Empty cells
-/// have range 0.0 and cluster_id -1.
+// encode rangegraph as bits: header: u32 + stamp_sec: i32 + stamp_nanosec: u32 + rows: u32
+// + cols: u32 + az_res_centideg: u32 + record_len: u32 + reserved: u64 + 
+/// records: rows * cols (indexed by ring * cols + col)
 fn encode_rangegraph(header: &Header, graph: &segmentation::RangeGraph) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 + graph.nodes.len() * RANGEGRAPH_RECORD_LEN);
     buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
@@ -116,11 +84,9 @@ fn encode_rangegraph(header: &Header, graph: &segmentation::RangeGraph) -> Vec<u
     buf
 }
 
-/// Wire format published on `rslidar/costmap`: a 32-byte header (stamp_sec:
-/// i32, stamp_nanosec: u32, size_x: u32, size_y: u32, resolution: f32,
-/// origin_x: f32, origin_y: f32, reserved: u32, all little-endian) followed by
-/// `size_x * size_y` row-major u8 costs (0 free .. 253 inscribed, 254 lethal,
-/// 255 unknown), cell (0, 0) at (origin_x, origin_y).
+// encode costmap as bits: header: u2 + stamp_sec: i32 + stamp_nanosec: u32 + size_x: u32
+// + size_y: u32 + resolution: f32 + origin_x: f32 + origin_y: f32 + reserved: u32 +
+// costs: size_x * size_y * u8 (0 free, 254 lethal, 255 unknown)
 fn encode_costmap(header: &Header, map: &costmap_2d::Costmap2D) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 + map.data.len());
     buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
@@ -147,23 +113,49 @@ fn build_segmented_data(cloud_data: &[u8], point_cluster: &[i32]) -> Vec<u8> {
     data
 }
 
-fn decode_pose(payload: &[u8]) -> Option<Transform> {
+fn decode_pose(payload: &[u8]) -> Option<(i64, Transform)> {
     if payload.len() < 40 {
         return None;
     }
     let f32_at = |i: usize| f32::from_le_bytes(payload[i..i + 4].try_into().unwrap());
-    let t_lidar = NVector3::new(f32_at(12), f32_at(16), f32_at(20));
-    let r_lidar = NUnitQuaternion::from_quaternion(NQuaternion::new(
-        f32_at(36), f32_at(24), f32_at(28), f32_at(32),
-    ));
-    let q = r_lidar.quaternion();
+    let sec = i32::from_le_bytes(payload[0..4].try_into().unwrap()) as i64;
+    let nanosec = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as i64;
+    Some((sec * 1_000_000_000 + nanosec, Transform {
+        translation: NVector3::new(f32_at(12), f32_at(16), f32_at(20)),
+        rotation: NUnitQuaternion::from_quaternion(NQuaternion::new(
+            f32_at(36), f32_at(24), f32_at(28), f32_at(32),
+        )),
+    }))
+}
 
-    Some(Transform{
-        translation: NVector3::new(t_lidar.x, t_lidar.y, t_lidar.z),
-        rotation: NUnitQuaternion::from_quaternion(
-            NQuaternion::new(q.w, q.i, q.j, q.k)
-        )
-    })
+fn encode_pose(header: &Header, tf: &Transform) -> Vec<u8> {
+    let q = tf.rotation.quaternion();
+    let mut buf = Vec::with_capacity(40);
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    for v in [tf.translation.x, tf.translation.y, tf.translation.z, q.i, q.j, q.k, q.w] {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf
+}
+
+fn to_world(tf: &Transform, cloud_data: &mut [u8], graph: &mut segmentation::RangeGraph) {
+    for p in cloud_data.chunks_exact_mut(POINT_STEP as usize) {
+        let f = |i: usize| f32::from_le_bytes(p[i..i + 4].try_into().unwrap());
+        let (x, y, z) = (f(0), f(4), f(8));
+        if x.is_nan() {
+            continue;
+        }
+        let w = tf.apply(NVector3::new(x, y, z));
+        p[0..4].copy_from_slice(&w.x.to_le_bytes());
+        p[4..8].copy_from_slice(&w.y.to_le_bytes());
+        p[8..12].copy_from_slice(&w.z.to_le_bytes());
+    }
+    for n in graph.nodes.iter_mut().filter(|n| n.valid) {
+        let w = tf.apply(NVector3::new(n.x, n.y, n.z));
+        (n.x, n.y, n.z) = (w.x, w.y, w.z);
+    }
 }
 
 
@@ -227,14 +219,23 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         std::process::exit(1)
     });
 
-    let tf_lidar_to_world = Arc::new(Mutex::new(Transform::identity()));
-    let tf_pose = Arc::clone(&tf_lidar_to_world);
+    let pub_pose_frame = publisher(&session, "rslidar/pose_frame").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
+    let poses: PoseBuffer = Arc::new(Mutex::new(VecDeque::new()));
+    let poses_in = Arc::clone(&poses);
     let _pose_subscriber = session
         .declare_subscriber(POSE_KEY)
         .callback(move |sample| {
             let payload = sample.payload().to_bytes();
             if let Some(pose) = decode_pose(&payload) {
-                *tf_pose.lock().unwrap() = pose;
+                let mut buf = poses_in.lock().unwrap();
+                if buf.len() == POSE_BUFFER_LEN {
+                    buf.pop_front();
+                }
+                buf.push_back(pose);
             } else {
                 eprintln!(
                     "zenoh_test: dropping malformed pose ({} bytes)",
@@ -249,9 +250,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         });
 
     let mut costmap = costmap_2d::Costmap::new(&costmap_params);
-    let mut decoder = RsHeliosDecoder::new(
-        &cfg, seg_params, tf_lidar_to_world
-    );
+    let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut frame_count = 0u64;
     let image_dir = std::path::Path::new("range_images");
     std::fs::create_dir_all(image_dir).expect("create range_images dir");
@@ -261,9 +260,17 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         match msg {
             RawPacket::Difop(buf) => decoder.decode_difop(&buf),
             RawPacket::Msop(buf) => {
-                for (cloud, range_graph) in decoder.decode_msop(&buf) {
+                for (mut cloud, mut range_graph) in decoder.decode_msop(&buf) {
                     frame_count += 1;
 
+                    let stamp_ns = cloud.header.stamp_sec as i64 * 1_000_000_000
+                        + cloud.header.stamp_nanosec as i64;
+                    let tf = interpolate_pose(&poses.lock().unwrap(), stamp_ns)
+                        .unwrap_or_else(Transform::identity);
+                    to_world(&tf, &mut cloud.data, &mut range_graph);
+                    if let Err(error) = pub_pose_frame.put(encode_pose(&cloud.header, &tf)).wait() {
+                        eprintln!("rslidar: publish frame pose: {error}");
+                    }
                     let mut point_cluster = vec![-1i32; cloud.width as usize];
                     for node in range_graph.nodes.iter() {
                         if node.valid && node.point_idx >= 0 {

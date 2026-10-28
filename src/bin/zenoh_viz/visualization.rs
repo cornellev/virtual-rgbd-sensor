@@ -40,7 +40,7 @@ pub struct CloudChannel(pub Mutex<mpsc::Receiver<Vec<VizPoint>>>);
 #[derive(Component)]
 pub struct PointCloudEntity;
 
-/// Wraps the receiving end of the pose (`rslidar/pose_world`) channel, same
+/// Wraps the receiving end of the pose (`rslidar/pose_frame`) channel, same
 /// pattern as `CloudChannel`/`CostmapChannel`.
 #[derive(Resource)]
 pub struct PoseChannel(pub Mutex<mpsc::Receiver<(Vec3, Quat)>>);
@@ -282,7 +282,7 @@ const CAR_HEIGHT: f32 = 15.5 * INCH;
 const LIDAR_IN_CAR: Vec3 = Vec3::new(-0.355, 0.609, 0.0);
 
 /// Draws a wireframe box for the car and marks the LiDAR, both placed at the
-/// live `LidarPose` (world-frame, from `rslidar/pose_world`) instead of
+/// live `LidarPose` (world-frame, from `rslidar/pose_frame`) instead of
 /// assuming the LiDAR sits fixed at the scene origin. `LIDAR_IN_CAR` is still
 /// the car's rigid, unchanging offset from the LiDAR -- it's just rotated and
 /// translated by the current pose now, rather than being the whole answer.

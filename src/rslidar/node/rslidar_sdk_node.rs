@@ -5,9 +5,6 @@
 use crate::segmentation;
 use crate::costmap_2d;
 
-use nalgebra::Vector3;
-use anyhow::Result;
-use crate::transform::{self, Transform, PoseBuffer};
 pub use crate::config::*;
 use crate::rslidar_math::*;
 use pcap_file::pcap::PcapReader;
@@ -282,17 +279,10 @@ pub struct RsHeliosDecoder {
 
     chan_tss: [f64; 32],
     chan_azis: [f32; 32],
-
-    // tf_static lidar to robot body frame to world
-    tf_lidar_to_world: Arc<Mutex<Transform>>
 }
 
 impl RsHeliosDecoder {
-    pub fn new(
-        cfg: &DriverConfig,
-        seg_params: Arc<Mutex<segmentation::SegParams>>,
-        tf_lidar_to_world: Arc<Mutex<Transform>>
-    ) -> Self {
+    pub fn new(cfg: &DriverConfig, seg_params: Arc<Mutex<segmentation::SegParams>>) -> Self {
         Self {
             distance_section: DistanceSection::new(cfg.min_distance, cfg.max_distance),
             // start_angle/end_angle are plain degrees in config.yaml, but
@@ -316,7 +306,6 @@ impl RsHeliosDecoder {
             prev_point_ts: 0.0,
             chan_tss: chan_tss(),
             chan_azis: chan_azis(),
-            tf_lidar_to_world
         }
     }
 
@@ -453,33 +442,7 @@ impl RsHeliosDecoder {
                         );
                     }
 
-                    // Clustering above is correct in sensor-local coordinates
-                    // (it only depends on intra-frame relative geometry, which
-                    // a rigid transform wouldn't change), so the world-frame
-                    // conversion happens once here, after segmentation and
-                    // before this frame goes to any consumer.
-                    let stamp_ns = (frame_ts * 1e9).round() as i64;
-                    let transform = self.tf_lidar_to_world.lock().unwrap();
-                    for p in self.points.iter_mut() {
-                        if p.x.is_nan() {
-                            continue;
-                        }
-                        let world = transform.apply(Vector3::new(p.x, p.y, p.z));
-                        (p.x, p.y, p.z) = (world.x, world.y, world.z);
-                    }
-                    for node in finished_graph.nodes.iter_mut() {
-                        if !node.valid {
-                            continue;
-                        }
-                        let world = transform.apply(Vector3::new(node.x, node.y, node.z));
-                        (node.x, node.y, node.z) = (world.x, world.y, world.z);
-                    }
-
                     let cloud = build_point_cloud(&self.points, frame_ts, &self.cfg.frame_id, self.cfg.dense_points);
-
-                    // Identity when no pose covers this frame yet (e.g. before
-                    // the first orch/location samples arrive), matching the
-                    // no-op behavior before this field existed.
                     out.push((cloud, finished_graph));
                 }
                 self.points.clear();
@@ -513,7 +476,8 @@ impl RsHeliosDecoder {
                     let sh0 = sin_centideg(angle_horiz);
 
                     let x = distance * cv * ch + RX * ch0;
-                    let y = -distance * cv * sh - RX * sh0;
+                    let y = -distance * cv * sh - RX * sh0; // spherical to cartesian
+                    let y = if self.cfg.mirror_y { -y } else { y };
 
                     let ring = self.chan_angles.user_chan[chan] as usize;
                     let point_idx = self.points.len() as i32;
