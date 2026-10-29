@@ -178,6 +178,7 @@ pub fn drain_latest_costmap(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: Query<(Entity, &CostmapPlane, &mut Transform)>,
     show: Res<ShowCostmap>,
+    pose: Res<LidarPose>,
 ) {
     let latest = {
         let rx = channel.0.lock().unwrap();
@@ -195,19 +196,20 @@ pub fn drain_latest_costmap(
 
     let width = costmap.size_x as f32 * costmap.resolution;
     let height = costmap.size_y as f32 * costmap.resolution;
-    // Same (x, z, -y) LiDAR -> Bevy remap as the point cloud.
-    let center = Vec3::new(
-        costmap.origin_x + width / 2.0,
-        COSTMAP_PLANE_Y,
-        -(costmap.origin_y + height / 2.0),
-    );
+    // The grid is in the sensor frame: remap its center like the point cloud
+    // ((x, y) -> (x, -y) in Bevy), then place it at the frame's lidar pose,
+    // keeping the plane at a fixed height.
+    let local = Vec3::new(costmap.origin_x + width / 2.0, 0.0, -(costmap.origin_y + height / 2.0));
+    let mut center = pose.translation + pose.rotation * local;
+    center.y = COSTMAP_PLANE_Y;
+    let placement = Transform::from_translation(center).with_rotation(pose.rotation);
 
     let existing = query.single_mut().ok();
     let (image_handle, material_handle) = match existing {
         Some((_, plane, mut transform))
             if plane.size_x == costmap.size_x && plane.size_y == costmap.size_y =>
         {
-            transform.translation = center;
+            *transform = placement;
             (plane.image.clone(), plane.material.clone())
         }
         other => {
@@ -235,7 +237,7 @@ pub fn drain_latest_costmap(
             commands.spawn((
                 Mesh3d(meshes.add(Plane3d::default().mesh().size(width, height))),
                 MeshMaterial3d(material.clone()),
-                Transform::from_translation(center),
+                placement,
                 CostmapPlane { image: image.clone(), material: material.clone(), size_x: costmap.size_x, size_y: costmap.size_y },
             ));
             (image, material)

@@ -217,6 +217,6 @@ fn main() {
         .init_resource::<ShowCostmap>()
         .init_resource::<LidarPose>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, draw_origin_axes, draw_vehicle))
+        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap.after(drain_latest_pose), drain_latest_pose, orbit_camera, draw_origin_axes, draw_vehicle))
         .run();
 }

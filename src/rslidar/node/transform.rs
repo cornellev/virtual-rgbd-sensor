@@ -1,7 +1,6 @@
 use nalgebra::{UnitQuaternion, Vector3};
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 // 3d pose
 #[derive(Clone, Copy, Debug)]
@@ -27,9 +26,6 @@ impl Transform {
         }
     }
 }
-
-// stamped lidar -> world poses, ascending by stamp_ns.
-pub type PoseBuffer = Arc<Mutex<VecDeque<(i64, Transform)>>>;
 
 /// Pose at `stamp_ns`: lerp/SLERP between the bracketing samples, clamped to
 /// the first/last sample outside the buffered range.

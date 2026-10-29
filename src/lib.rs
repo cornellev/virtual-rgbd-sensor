@@ -18,6 +18,16 @@ pub mod visualize;
 #[path = "rslidar/node/config.rs"]
 pub mod config;
 
+#[path = "rslidar/node/wire.rs"]
+pub mod wire;
+
+#[path = "rslidar/node/pipeline.rs"]
+pub mod pipeline;
+
+#[cfg(feature = "native")]
+#[path = "rslidar/node/zenoh_io.rs"]
+pub mod zenoh_io;
+
 #[path = "rslidar/costmap/mod.rs"]
 pub mod costmap;
 

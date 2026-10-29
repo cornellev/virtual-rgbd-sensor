@@ -152,6 +152,7 @@ const BIN_COLS: usize = 40;
 /// 2d array representation of LiDAR divided by the vertical angles fired at each time
 /// frame and also the horizontal angles fired consecutively at different timeframes
 /// until we get full 0 -> 359 rotation
+#[derive(Clone)]
 pub struct RangeGraph {
     pub nodes: Vec<RangeNode>,
 }
