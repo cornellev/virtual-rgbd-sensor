@@ -14,15 +14,29 @@
 // ~100k ray walks, with the same result as long as each sector gets at
 // least one return (see CostmapParams::clearing_az_res_deg).
 
-use crate::costmap_2d::{Bounds, Costmap2D, CostmapParams, LETHAL_OBSTACLE, FREE_SPACE, NO_INFORMATION};
+use crate::costmap_2d::{Bounds, ClearMode, Costmap2D, CostmapParams, LETHAL_OBSTACLE, FREE_SPACE, NO_INFORMATION};
 use crate::segmentation::{RangeGraph, AZ_RES_CENTIDEG, NUM_COLS};
 
 const NO_SECTOR: u32 = u32::MAX;
 
+/// Clearing sector of the horizontal direction (dx, dy) from the sensor.
+/// Shared by the per-cell table and the per-point lookup so the two always
+/// agree on which way a ray points.
+fn sector_of(dx: f32, dy: f32, cols_per_sector: usize) -> usize {
+    let az = ((dy.atan2(dx).to_degrees() * 100.0).round() as i32).rem_euclid(36000);
+    (az / AZ_RES_CENTIDEG) as usize % NUM_COLS / cols_per_sector
+}
+
 pub struct ObstacleLayer {
-    /// The layer's own grid. Persists across revolutions like
-    /// ObstacleLayer's costmap_: a cell stays LETHAL until a ray clears it.
+    /// The layer's own grid. With `ClearMode::Fov` it persists across
+    /// revolutions like ObstacleLayer's costmap_ (a cell stays LETHAL until a
+    /// ray clears it); with `ClearMode::Full` it's rebuilt from each scan.
     grid: Costmap2D,
+    clear_mode: ClearMode,
+    default_value: u8,
+    /// Last revolution's marks, which can lie outside `window` when
+    /// obstacle_max_range > raytrace_max_range.
+    prev_marks: Bounds,
 
     sensor_x: f32,
     sensor_y: f32,
@@ -87,13 +101,7 @@ impl ObstacleLayer {
                     let sector = if range < params.raytrace_min_range || range > params.raytrace_max_range {
                         NO_SECTOR
                     } else {
-                        // decode_msop computes y = -d*cos(v)*sin(h), so the
-                        // azimuth the RangeGraph columns are keyed on is
-                        // atan2(-y, x), not atan2(y, x).
-                        let az = (-dy).atan2(dx).to_degrees() * 100.0;
-                        let az = (az.round() as i32).rem_euclid(36000);
-                        let col = (az / AZ_RES_CENTIDEG) as usize % NUM_COLS;
-                        (col / cols_per_sector) as u32
+                        sector_of(dx, dy, cols_per_sector) as u32
                     };
                     cell_sector.push(sector);
                     cell_range.push(range);
@@ -103,6 +111,9 @@ impl ObstacleLayer {
 
         Self {
             grid,
+            clear_mode: params.clear_mode,
+            default_value,
+            prev_marks: Bounds::empty(),
             sensor_x: params.sensor_x,
             sensor_y: params.sensor_y,
             sensor_z: params.sensor_z,
@@ -127,7 +138,7 @@ impl ObstacleLayer {
         self.sector_clear_range.fill(0.0);
         self.marks.clear();
 
-        for (i, node) in graph.nodes.iter().enumerate() {
+        for node in graph.nodes.iter() {
             if !node.valid {
                 continue;
             }
@@ -139,8 +150,12 @@ impl ObstacleLayer {
             }
 
             let range = node.x.hypot(node.y);
+            // From the point's position, not its range-graph column: the column
+            // is the raw packet azimuth, which disagrees with (x, y) whenever the
+            // decoder flips axes (e.g. mirror_y), and then rays would clear the
+            // mirror-image sector of where the obstacle is marked.
+            let sector = sector_of(node.x, node.y, self.cols_per_sector);
             // raytraceFreespace clips rays longer than raytrace_max_range.
-            let sector = (i % NUM_COLS) / self.cols_per_sector;
             let clear = range.min(self.raytrace_max_range);
             if node.range > self.raytrace_min_range && clear > self.sector_clear_range[sector] {
                 self.sector_clear_range[sector] = clear;
@@ -153,11 +168,17 @@ impl ObstacleLayer {
             }
         }
 
+        // Everything this revolution can touch, plus last revolution's marks so
+        // the master grid is reset over them too.
+        let bounds = self.window.union(&self.prev_marks);
+        if self.clear_mode == ClearMode::Full {
+            self.grid.reset_map(bounds, self.default_value);
+        }
+
         // Clear first, then mark, same order as updateBounds, so a ray passing
         // over a low obstacle can't erase it. Unlike raytraceLine this also
         // clears the endpoint cell, which doesn't matter since obstacles are
         // re-marked right after.
-        let mut bounds = Bounds::empty();
         if !self.window.is_empty() {
             let w = self.window.max_x - self.window.min_x;
             for my in self.window.min_y..self.window.max_y {
@@ -170,16 +191,17 @@ impl ObstacleLayer {
                     }
                 }
             }
-            bounds = self.window;
         }
 
+        let mut marked = Bounds::empty();
         for &(mx, my) in &self.marks {
             let idx = self.grid.index(mx, my);
             self.grid.data[idx] = LETHAL_OBSTACLE;
-            bounds.touch(mx, my);
+            marked.touch(mx, my);
         }
+        self.prev_marks = marked;
 
-        bounds
+        bounds.union(&marked)
     }
 
     /// CostmapLayer::updateWithMax.

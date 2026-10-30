@@ -9,7 +9,8 @@ use visualization::{
     draw_origin_axes, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, setup_scene,
     toggle_color_mode, toggle_costmap, ShowCostmap, draw_vehicle,
     tune_seg_params, CloudChannel, CloudColorMode,
-    CostmapChannel, LidarPose, OrbitCamera, PoseChannel, SegParamsHandle, SegParamsPublisher, VizCostmap, VizPoint,
+    CostmapChannel, CostmapKind, CostmapView, LidarPose, OrbitCamera, PoseChannel, SegParamsHandle, SegParamsPublisher,
+    VizCostmap, VizPoint,
 };
 
 use zenoh::Wait;
@@ -24,7 +25,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
-const COSTMAP_KEY: &str = "rslidar/costmap";
+const LOCAL_COSTMAP_KEY: &str = "rslidar/costmap";
+const GLOBAL_COSTMAP_KEY: &str = "rslidar/global_costmap";
 const POSE_KEY: &str = "rslidar/pose_frame";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -136,7 +138,7 @@ fn decode_pose(payload: &[u8]) -> Option<(Vec3, Quat)> {
 
 fn main() {
     let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
-    let (costmap_tx, costmap_rx) = mpsc::channel::<VizCostmap>();
+    let (costmap_tx, costmap_rx) = mpsc::channel::<(CostmapKind, VizCostmap)>();
     let (pose_tx, pose_rx) = mpsc::channel::<(Vec3, Quat)>();
 
     let session = zenoh::open(zenoh::Config::default())
@@ -170,20 +172,24 @@ fn main() {
             std::process::exit(1)
         });
 
-    let _costmap_subscriber = session
-        .declare_subscriber(COSTMAP_KEY)
-        .callback(move |sample| {
-            let payload = sample.payload().to_bytes();
-            if let Some(costmap) = decode_costmap(&payload) {
-                let _ = costmap_tx.send(costmap);
-            } else {
-                eprintln!("zenoh_test: dropping malformed costmap ({} bytes)", payload.len());
-            }
-        })
-        .wait()
-        .unwrap_or_else(|error| {
-            eprintln!("zenoh_test: failed to subscribe to {COSTMAP_KEY}: {error}");
-            std::process::exit(1)
+    let _costmap_subscribers = [(LOCAL_COSTMAP_KEY, CostmapKind::Local), (GLOBAL_COSTMAP_KEY, CostmapKind::Global)]
+        .map(|(key, kind)| {
+            let tx = costmap_tx.clone();
+            session
+                .declare_subscriber(key)
+                .callback(move |sample| {
+                    let payload = sample.payload().to_bytes();
+                    if let Some(costmap) = decode_costmap(&payload) {
+                        let _ = tx.send((kind, costmap));
+                    } else {
+                        eprintln!("zenoh_test: dropping malformed costmap on {key} ({} bytes)", payload.len());
+                    }
+                })
+                .wait()
+                .unwrap_or_else(|error| {
+                    eprintln!("zenoh_test: failed to subscribe to {key}: {error}");
+                    std::process::exit(1)
+                })
         });
 
     let _pose_subscriber = session
@@ -202,7 +208,10 @@ fn main() {
             std::process::exit(1)
         });
 
-    println!("zenoh_test: subscribed to {POINTS_KEY}, {COSTMAP_KEY} and {POSE_KEY}, waiting for frames...");
+    println!(
+        "zenoh_test: subscribed to {POINTS_KEY}, {LOCAL_COSTMAP_KEY}, {GLOBAL_COSTMAP_KEY} and {POSE_KEY}, \
+         waiting for frames... (C show/hide costmap, V local/global)"
+    );
 
     App::new()
         .add_plugins(DefaultPlugins.build().disable::<bevy::audio::AudioPlugin>())
@@ -215,8 +224,9 @@ fn main() {
         .insert_resource(SegParamsPublisher(session.clone()))
         .init_resource::<CloudColorMode>()
         .init_resource::<ShowCostmap>()
+        .init_resource::<CostmapView>()
         .init_resource::<LidarPose>()
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, draw_origin_axes, draw_vehicle))
+        .add_systems(Update, (toggle_color_mode, toggle_costmap, tune_seg_params, drain_latest_cloud, drain_latest_costmap.after(drain_latest_pose), drain_latest_pose, orbit_camera, draw_origin_axes, draw_vehicle))
         .run();
 }

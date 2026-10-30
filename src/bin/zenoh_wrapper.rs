@@ -15,6 +15,8 @@ type RslidarShmProvider = ShmProvider<PosixShmProviderBackend>;
 const SHM_POOL_SIZE: usize = 64 * 1024 * 1024;
 const POSE_KEY: &str = "rslidar/pose_world";
 const POSE_BUFFER_LEN: usize = 1024;
+/// The global map changes slowly and is large, so it goes out at 1 Hz.
+const GLOBAL_PUBLISH_EVERY: u64 = 10;
 
 use anyhow::Result;
 use virtual_rgbd_sensor::costmap_2d;
@@ -166,7 +168,12 @@ fn to_world(tf: &Transform, cloud_data: &mut [u8], graph: &mut segmentation::Ran
 /// Runs the UDP capture + decode loop, publishing each completed frame (raw
 /// and segmented) over zenoh. Headless -- visualization lives in a separate
 /// process (zenoh_test.rs) that subscribes to these keys.
-fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParams>>) {
+fn run_decoder(
+    config_path: String,
+    seg_params: Arc<Mutex<segmentation::SegParams>>,
+    global_map: &mut costmap_2d::GlobalMap,
+    range_images: bool,
+) {
     let text = match std::fs::read_to_string(&config_path) {
         Ok(t) => t,
         Err(e) => {
@@ -219,6 +226,11 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         std::process::exit(1)
     });
 
+    let pub_global_costmap = publisher(&session, "rslidar/global_costmap").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
     let pub_pose_frame = publisher(&session, "rslidar/pose_frame").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
@@ -253,8 +265,12 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
     let mut decoder = RsHeliosDecoder::new(&cfg, seg_params);
     let mut tracker = Tracker::new(0.5, 5);
     let mut frame_count = 0u64;
-    let image_dir = std::path::Path::new("range_images");
-    std::fs::create_dir_all(image_dir).expect("create range_images dir");
+    // PNG encoding costs ~50 ms/frame (release), so it's opt-in.
+    let image_dir = range_images.then(|| {
+        let dir = std::path::Path::new("range_images");
+        std::fs::create_dir_all(dir).expect("create range_images dir");
+        dir
+    });
 
     println!("rslidar: waiting for DIFOP/MSOP packets...");
     for msg in rx {
@@ -268,6 +284,17 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         + cloud.header.stamp_nanosec as i64;
                     let tf = interpolate_pose(&poses.lock().unwrap(), stamp_ns)
                         .unwrap_or_else(Transform::identity);
+
+                    // local costmap
+                    let costmap_start = Instant::now();
+                    costmap.update(&range_graph);
+                    let costmap_ms = costmap_start.elapsed().as_secs_f64() * 1e3;
+                    if let Err(error) = pub_costmap
+                        .put(encode_costmap(&cloud.header, costmap.master()))
+                        .wait() {
+                        eprintln!("rslidar: publish costmap: {error}");
+                    } // publishing local costmap in lidar frame
+
                     to_world(&tf, &mut cloud.data, &mut range_graph);
 
                     let ids = tracker.update(&aggregate_clusters(&range_graph));
@@ -305,31 +332,49 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
                         seg_bytes as f64 / 1024.0,
                     );
 
-                    let costmap_start = Instant::now();
-                    costmap.update(&range_graph);
-                    let costmap_ms = costmap_start.elapsed().as_secs_f64() * 1e3;
-                    if let Err(error) = pub_costmap
-                        .put(encode_costmap(&cloud.header, costmap.master()))
-                        .wait() {
-                        eprintln!("rslidar: publish costmap: {error}");
-                    }
                     if let Err(error) = pub_rangegraph
                         .put(encode_rangegraph(&cloud.header, &range_graph))
                         .wait() {
                         eprintln!("rslidar: publish range graph: {error}");
                     }
-                    if let Err(error) = write_images(&range_graph, image_dir, frame_count, 0, segmentation::NUM_COLS) {
-                        eprintln!("rslidar: write range images: {error}");
+                    if let Some(dir) = image_dir {
+                        if let Err(error) = write_images(&range_graph, dir, frame_count, 0, segmentation::NUM_COLS) {
+                            eprintln!("rslidar: write range images: {error}");
+                        }
                     }
-                    println!("output (costmap update {costmap_ms:.2} ms)")
+                    // global costmap in world frame, fov-fused from the local one.
+                    // Last, so this frame's other outputs never wait on it.
+                    let global_start = Instant::now();
+                    global_map.fuse(&costmap, &tf);
+                    let global_ms = global_start.elapsed().as_secs_f64() * 1e3;
+                    if frame_count % GLOBAL_PUBLISH_EVERY == 0 {
+                        if let Err(error) = pub_global_costmap
+                            .put(encode_costmap(&cloud.header, global_map.grid()))
+                            .wait() {
+                            eprintln!("rslidar: publish global costmap: {error}");
+                        }
+                    }
+                    println!("output (costmap update {costmap_ms:.2} ms, global fuse {global_ms:.2} ms)")
                 }
             }
         }
     }
 }
 
+/// Usage: zenoh_wrapper [CONFIG_PATH] [--range-images]
 fn main() {
-    let config_path = std::env::args().nth(1).unwrap_or_else(default_config_path);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let range_images = args.iter().any(|a| a == "--range-images");
+    let config_path = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(default_config_path);
     let seg_params = Arc::new(Mutex::new(segmentation::SegParams::default()));
-    run_decoder(config_path, seg_params);
+
+    let text = match std::fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("rslidar: failed to read config {config_path}: {e}");
+            std::process::exit(1)
+        }
+    };
+    let mut global_map = costmap_2d::GlobalMap::new(&parse_costmap_params(&text));
+    run_decoder(config_path, seg_params, &mut global_map, range_images);
 }

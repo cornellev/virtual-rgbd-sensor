@@ -46,8 +46,6 @@ pub struct DriverConfig {
     pub end_angle: f32,
     pub wait_for_difop: bool,
     pub frame_id: String,
-    // TEMPORARY: cev-sim encodes MSOP azimuth counterclockwise (hardware is
-    // clockwise), so its scans come out mirrored in y. Remove once fixed upstream.
     pub mirror_y: bool,
 
     // Offline playback: when `pcap_path` is set, MSOP/DIFOP packets are read
@@ -97,6 +95,11 @@ pub fn parse_costmap_params(text: &str) -> costmap_2d::CostmapParams {
         origin_y: scalar_or(text, "origin_y", d.origin_y),
         robot_radius: scalar_or(text, "robot_radius", d.robot_radius),
         track_unknown_space: scalar_or(text, "track_unknown_space", d.track_unknown_space),
+        clear_mode: scalar_or(text, "clear_mode", d.clear_mode),
+        global_width: scalar_or(text, "global_width", d.global_width),
+        global_height: scalar_or(text, "global_height", d.global_height),
+        global_origin_x: scalar_or(text, "global_origin_x", d.global_origin_x),
+        global_origin_y: scalar_or(text, "global_origin_y", d.global_origin_y),
         sensor_x: scalar_or(text, "sensor_x", d.sensor_x),
         sensor_y: scalar_or(text, "sensor_y", d.sensor_y),
         sensor_z: scalar_or(text, "sensor_z", d.sensor_z),

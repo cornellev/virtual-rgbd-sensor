@@ -112,9 +112,10 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
     ));
 }
 
-/// One costmap as published on `rslidar/costmap` (see `encode_costmap` in
-/// rslidar_sdk_node.rs): row-major u8 costs, cell (0, 0) at
-/// (`origin_x`, `origin_y`) in the LiDAR frame.
+/// One costmap as published by zenoh_wrapper (see `encode_costmap`):
+/// row-major u8 costs, cell (0, 0) at (`origin_x`, `origin_y`) -- in the
+/// LiDAR frame for `rslidar/costmap`, the world frame for
+/// `rslidar/global_costmap`.
 pub struct VizCostmap {
     pub size_x: usize,
     pub size_y: usize,
@@ -124,8 +125,33 @@ pub struct VizCostmap {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CostmapKind {
+    /// Latest scan only, LiDAR frame.
+    Local,
+    /// Accumulated, world frame.
+    Global,
+}
+
 #[derive(Resource)]
-pub struct CostmapChannel(pub Mutex<mpsc::Receiver<VizCostmap>>);
+pub struct CostmapChannel(pub Mutex<mpsc::Receiver<(CostmapKind, VizCostmap)>>);
+
+/// Which costmap the plane shows (V toggles it), plus the latest of each so
+/// switching repaints immediately instead of waiting for the next message.
+#[derive(Resource)]
+pub struct CostmapView {
+    pub kind: CostmapKind,
+    /// With the LiDAR pose current when it arrived, to place it in the world.
+    local: Option<(VizCostmap, Quat, Vec3)>,
+    global: Option<VizCostmap>,
+    dirty: bool,
+}
+
+impl Default for CostmapView {
+    fn default() -> Self {
+        Self { kind: CostmapKind::Local, local: None, global: None, dirty: false }
+    }
+}
 
 /// The textured plane the costmap is drawn on. Spawned by
 /// `drain_latest_costmap` on the first costmap, since the grid size isn't
@@ -168,8 +194,9 @@ fn costmap_colors() -> [[u8; 4]; 256] {
     lut
 }
 
-/// Pulls the newest costmap off the channel and repaints the plane's texture
-/// with it, spawning (or resizing) the plane first if needed.
+/// Pulls the newest local and global costmaps off the channel and repaints the
+/// plane with whichever `CostmapView` selects, spawning (or resizing) the
+/// plane first if needed.
 pub fn drain_latest_costmap(
     mut commands: Commands,
     channel: Res<CostmapChannel>,
@@ -178,36 +205,52 @@ pub fn drain_latest_costmap(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: Query<(Entity, &CostmapPlane, &mut Transform)>,
     show: Res<ShowCostmap>,
+    pose: Res<LidarPose>,
+    mut view: ResMut<CostmapView>,
 ) {
-    let latest = {
+    {
         let rx = channel.0.lock().unwrap();
-        let mut latest = None;
-        while let Ok(costmap) = rx.try_recv() {
-            latest = Some(costmap);
+        while let Ok((kind, costmap)) = rx.try_recv() {
+            match kind {
+                CostmapKind::Local => view.local = Some((costmap, pose.rotation, pose.translation)),
+                CostmapKind::Global => view.global = Some(costmap),
+            }
+            view.dirty |= kind == view.kind;
         }
-        latest
-    };
-    // Keep draining while hidden so the channel doesn't grow, but skip the repaint.
-    if !show.0 {
+    }
+    // Keep draining while hidden so the channel doesn't grow, but skip the
+    // repaint (and keep it pending for when the plane is shown again).
+    if !show.0 || !view.dirty {
         return;
     }
-    let Some(costmap) = latest else { return };
+    view.dirty = false;
+    let (costmap, rotation, translation) = match view.kind {
+        CostmapKind::Local => match &view.local {
+            Some((c, r, t)) => (c, *r, *t),
+            None => return,
+        },
+        CostmapKind::Global => match &view.global {
+            Some(c) => (c, Quat::IDENTITY, Vec3::ZERO),
+            None => return,
+        },
+    };
 
     let width = costmap.size_x as f32 * costmap.resolution;
     let height = costmap.size_y as f32 * costmap.resolution;
-    // Same (x, z, -y) LiDAR -> Bevy remap as the point cloud.
-    let center = Vec3::new(
-        costmap.origin_x + width / 2.0,
-        COSTMAP_PLANE_Y,
-        -(costmap.origin_y + height / 2.0),
-    );
+    // Same (x, z, -y) LiDAR -> Bevy remap as the point cloud, then the grid's
+    // pose in the world (identity for the world-frame global map). The plane
+    // height is set after so the LiDAR's own height isn't added to it.
+    let local_center = Vec3::new(costmap.origin_x + width / 2.0, 0.0, -(costmap.origin_y + height / 2.0));
+    let mut center = rotation * local_center + translation;
+    center.y = COSTMAP_PLANE_Y;
+    let placement = Transform::from_translation(center).with_rotation(rotation);
 
     let existing = query.single_mut().ok();
     let (image_handle, material_handle) = match existing {
         Some((_, plane, mut transform))
             if plane.size_x == costmap.size_x && plane.size_y == costmap.size_y =>
         {
-            transform.translation = center;
+            *transform = placement;
             (plane.image.clone(), plane.material.clone())
         }
         other => {
@@ -235,7 +278,7 @@ pub fn drain_latest_costmap(
             commands.spawn((
                 Mesh3d(meshes.add(Plane3d::default().mesh().size(width, height))),
                 MeshMaterial3d(material.clone()),
-                Transform::from_translation(center),
+                placement,
                 CostmapPlane { image: image.clone(), material: material.clone(), size_x: costmap.size_x, size_y: costmap.size_y },
             ));
             (image, material)
@@ -304,7 +347,8 @@ pub fn draw_vehicle(mut gizmos: Gizmos, pose: Res<LidarPose>) {
     gizmos.line(lidar_pos, car_origin, lidar_color);
 }
 
-/// Whether the costmap plane is drawn; C toggles it (`toggle_costmap`).
+/// Whether the costmap plane is drawn; C toggles it, and V switches it between
+/// the local and global map (`toggle_costmap`).
 #[derive(Resource)]
 pub struct ShowCostmap(pub bool);
 
@@ -317,11 +361,20 @@ impl Default for ShowCostmap {
 pub fn toggle_costmap(
     keys: Res<ButtonInput<KeyCode>>,
     mut show: ResMut<ShowCostmap>,
+    mut view: ResMut<CostmapView>,
     mut planes: Query<&mut Visibility, With<CostmapPlane>>,
 ) {
     if keys.just_pressed(KeyCode::KeyC) {
         show.0 = !show.0;
         println!("visualization: costmap {}", if show.0 { "shown" } else { "hidden" });
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        view.kind = match view.kind {
+            CostmapKind::Local => CostmapKind::Global,
+            CostmapKind::Global => CostmapKind::Local,
+        };
+        view.dirty = true;
+        println!("visualization: showing {:?} costmap", view.kind);
     }
     let vis = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut planes {

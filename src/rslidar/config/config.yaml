@@ -19,12 +19,12 @@ lidar:
       tail_layer_bytes: 0          #  Bytes of tail layer. thers is no tail layer if it is 0
 
 
-      min_distance: 0.2            #  Minimum distance of point cloud
+      min_distance: 0.0            #  Minimum distance of point cloud
       max_distance: 200            #  Maximum distance of point cloud
       use_lidar_clock: true        #  true--Use the lidar clock as the message timestamp
                                    #  false-- Use the system clock as the timestamp
       dense_points: false          #  true: discard NAN points; false: reserve NAN points
-      mirror_y: false              #  TEMPORARY: true for cev-sim pcaps (counterclockwise azimuth); false for real hardware
+      mirror_y: true              #  TEMPORARY: true for cev-sim pcaps (counterclockwise azimuth); false for real hardware
 
       ts_first_point: true         #  true: time-stamp point cloud with the first point; false: with the last point;
                                    #  these parameters are used from mechanical lidar
@@ -53,6 +53,11 @@ costmap: # nav2 costmap.yaml names, see src/rslidar/node/costmap_2d.rs
   origin_y: -25.0
   robot_radius: 0.3
   track_unknown_space: false
+  clear_mode: full                 #  local map: full = latest scan only, fov = keep cells the scan didn't observe
+  global_width: 100                #  world-frame global map (always fov-fused from the local map), meters
+  global_height: 100
+  global_origin_x: -50.0
+  global_origin_y: -50.0
   sensor_x: 0.0                    #  rslidar position in the map frame
   sensor_y: 0.0
   sensor_z: 0.0                    #  set to the mount height so obstacle heights are above ground
