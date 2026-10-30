@@ -216,7 +216,7 @@ fn run_decoder(
         std::process::exit(1)
     });
 
-    let pub_costmap = publisher(&session, "rslidar/costmap").unwrap_or_else(|error| {
+    let pub_costmap = publisher(&session, "rslidar/occupancy").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
@@ -226,7 +226,7 @@ fn run_decoder(
         std::process::exit(1)
     });
 
-    let pub_global_costmap = publisher(&session, "rslidar/global_costmap").unwrap_or_else(|error| {
+    let pub_global_costmap = publisher(&session, "rslidar/global_occupancy").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });

@@ -114,8 +114,8 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
 
 /// One costmap as published by zenoh_wrapper (see `encode_costmap`):
 /// row-major u8 costs, cell (0, 0) at (`origin_x`, `origin_y`) -- in the
-/// LiDAR frame for `rslidar/costmap`, the world frame for
-/// `rslidar/global_costmap`.
+/// LiDAR frame for `rslidar/occupancy`, the world frame for
+/// `rslidar/global_occupancy`.
 pub struct VizCostmap {
     pub size_x: usize,
     pub size_y: usize,

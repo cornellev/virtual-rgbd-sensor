@@ -25,8 +25,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "rslidar/points/segmented";
-const LOCAL_COSTMAP_KEY: &str = "rslidar/costmap";
-const GLOBAL_COSTMAP_KEY: &str = "rslidar/global_costmap";
+const LOCAL_OCC_KEY: &str = "rslidar/occupancy";
+const GLOBAL_OCC_KEY: &str = "rslidar/global_occupancy";
 const POSE_KEY: &str = "rslidar/pose_frame";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -172,7 +172,7 @@ fn main() {
             std::process::exit(1)
         });
 
-    let _costmap_subscribers = [(LOCAL_COSTMAP_KEY, CostmapKind::Local), (GLOBAL_COSTMAP_KEY, CostmapKind::Global)]
+    let _costmap_subscribers = [(LOCAL_OCC_KEY, CostmapKind::Local), (GLOBAL_OCC_KEY, CostmapKind::Global)]
         .map(|(key, kind)| {
             let tx = costmap_tx.clone();
             session
@@ -209,7 +209,7 @@ fn main() {
         });
 
     println!(
-        "zenoh_test: subscribed to {POINTS_KEY}, {LOCAL_COSTMAP_KEY}, {GLOBAL_COSTMAP_KEY} and {POSE_KEY}, \
+        "zenoh_test: subscribed to {POINTS_KEY}, {LOCAL_OCC_KEY}, {GLOBAL_OCC_KEY} and {POSE_KEY}, \
          waiting for frames... (C show/hide costmap, V local/global)"
     );
 
