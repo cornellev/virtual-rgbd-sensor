@@ -25,8 +25,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 const POINTS_KEY: &str = "cev/sensors/lidar/segmented_points";
-const LOCAL_OCC_KEY: &str = "cev/sensors/lidar/local_occupancy_grid";
-const GLOBAL_OCC_KEY: &str = "cev/sensors/lidar/occupancy_grid";
+const LOCAL_OCC_KEY: &str = "cev/sensors/lidar/occupancy_grid/local";
+const GLOBAL_OCC_KEY: &str = "cev/sensors/lidar/occupancy_grid/global";
 const POSE_KEY: &str = "cev/sensors/pose_frame";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 

@@ -216,7 +216,7 @@ fn run_decoder(
         std::process::exit(1)
     });
 
-    let pub_costmap = publisher(&session, "cev/sensors/lidar/local_occupancy_grid").unwrap_or_else(|error| {
+    let pub_costmap = publisher(&session, "cev/sensors/lidar/occupancy_grid/local").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
@@ -226,7 +226,7 @@ fn run_decoder(
         std::process::exit(1)
     });
 
-    let pub_global_costmap = publisher(&session, "cev/sensors/lidar/occupancy_grid").unwrap_or_else(|error| {
+    let pub_global_costmap = publisher(&session, "cev/sensors/lidar/occupancy_grid/global").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
