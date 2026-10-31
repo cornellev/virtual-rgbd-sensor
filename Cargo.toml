@@ -2,19 +2,29 @@
 name = "virtual-rgbd-sensor"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[features]
+viz = ["dep:bevy", "dep:bevy_points"]
 
 [[bin]]
-name = "rslidar_viz"
-path = "src/rslidar/node/rslidar_sdk_node.rs"
+name = "zenoh_wrapper"
+path = "src/bin/zenoh_wrapper.rs"
+
+[[bin]]
+name = "shm_wrapper"
+path = "src/bin/shm_wrapper.rs"
 
 [[bin]]
 name = "zenoh_viz"
-path = "src/rslidar/node/zenoh_test.rs"
+path = "src/bin/zenoh_viz/main.rs"
+required-features = ["viz"]
 
 [dependencies]
 anyhow = "1"
-bevy = "0.16"
-bevy_points = "0.8"
+image = "0.25"
 pcap-file = "2"
 nalgebra = "*"
 zenoh = { version = "1.10", features = ["shared-memory", "unstable"] }
+bevy = { version = "0.16", optional = true }
+bevy_points = { version = "0.8", optional = true }
