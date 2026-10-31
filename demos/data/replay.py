@@ -142,7 +142,7 @@ def main():
     # Already lidar -> world; rslidar has no part in this anymore, so it's
     # published directly in the same binary format zenoh_wrapper used to
     # publish and zenoh_viz already decodes, not as orch/location JSON.
-    publisher = session.declare_publisher("rslidar/pose_world")
+    publisher = session.declare_publisher("cev/sensors/pose_world")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     time.sleep(0.3)
 
