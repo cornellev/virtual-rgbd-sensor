@@ -24,10 +24,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-const POINTS_KEY: &str = "rslidar/points/segmented";
-const LOCAL_OCC_KEY: &str = "rslidar/occupancy";
-const GLOBAL_OCC_KEY: &str = "rslidar/global_occupancy";
-const POSE_KEY: &str = "rslidar/pose_frame";
+const POINTS_KEY: &str = "cev/sensors/lidar/segmented_points";
+const LOCAL_OCC_KEY: &str = "cev/sensors/lidar/occupancy_grid/local";
+const GLOBAL_OCC_KEY: &str = "cev/sensors/lidar/occupancy_grid/global";
+const POSE_KEY: &str = "cev/sensors/pose_frame";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Fixed axis remap, lidar (REP-103: x-forward, y-left, z-up) -> Bevy
@@ -41,8 +41,8 @@ fn lidar_to_bevy_rotation() -> NUnitQuaternion<f32> {
 /// Mirrors `encode_points`/`build_segmented_data` in rslidar_sdk_node.rs: a
 /// 16-byte header (stamp_sec: i32, stamp_nanosec: u32, width: u32,
 /// point_step: u32, all little-endian) followed by `width` records of
-/// `point_step` bytes each -- XYZI (16 bytes, `rslidar/points/raw`) or XYZI +
-/// a trailing i32 cluster id (20 bytes, `rslidar/points/segmented`).
+/// `point_step` bytes each -- XYZI (16 bytes, `cev/sensors/lidar/raw_points`) or XYZI +
+/// a trailing i32 cluster id (20 bytes, `cev/sensors/lidar/segmented_points`).
 fn decode_points(payload: &[u8]) -> Option<Vec<VizPoint>> {
     if payload.len() < 16 {
         return None;

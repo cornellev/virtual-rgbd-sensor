@@ -13,7 +13,7 @@ use nalgebra::{Quaternion as NQuaternion, UnitQuaternion as NUnitQuaternion, Vec
 
 type RslidarShmProvider = ShmProvider<PosixShmProviderBackend>;
 const SHM_POOL_SIZE: usize = 64 * 1024 * 1024;
-const POSE_KEY: &str = "rslidar/pose_world";
+const POSE_KEY: &str = "cev/sensors/pose_world";
 const POSE_BUFFER_LEN: usize = 1024;
 /// The global map changes slowly and is large, so it goes out at 1 Hz.
 const GLOBAL_PUBLISH_EVERY: u64 = 10;
@@ -207,31 +207,31 @@ fn run_decoder(
             eprintln!("rslidar: failed to open zenoh session: {error}");
             std::process::exit(1)
         });
-    let pub_raw = publisher(&session, "rslidar/points/raw").unwrap_or_else(|error| {
+    let pub_raw = publisher(&session, "cev/sensors/lidar/raw_points").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
-    let pub_seg = publisher(&session, "rslidar/points/segmented").unwrap_or_else(|error| {
-        eprintln!("rslidar: {error}");
-        std::process::exit(1)
-    });
-
-    let pub_costmap = publisher(&session, "rslidar/occupancy").unwrap_or_else(|error| {
+    let pub_seg = publisher(&session, "cev/sensors/lidar/segmented_points").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
 
-    let pub_rangegraph = publisher(&session, "rslidar/points/rangegraph").unwrap_or_else(|error| {
+    let pub_costmap = publisher(&session, "cev/sensors/lidar/occupancy_grid/local").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
 
-    let pub_global_costmap = publisher(&session, "rslidar/global_occupancy").unwrap_or_else(|error| {
+    let pub_rangegraph = publisher(&session, "cev/sensors/lidar/range_graph").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
 
-    let pub_pose_frame = publisher(&session, "rslidar/pose_frame").unwrap_or_else(|error| {
+    let pub_global_costmap = publisher(&session, "cev/sensors/lidar/occupancy_grid/global").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
+    let pub_pose_frame = publisher(&session, "cev/sensors/pose_frame").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
