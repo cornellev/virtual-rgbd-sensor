@@ -15,7 +15,7 @@ In Rust! Read the documentation [here](/documentation/report.pdf).
   <source src="/demos/yay.mp4" type="video/mp4">
 </video> -->
 
-3) Adopted cpp ```nav2_costmap_2d``` point cloud to costmap conversion logic for outputting occupancy grids in Rust. Implementation details are contained [here](/src/rslidar/costmap).
+3) Adopted cpp ```nav2_costmap_2d``` point cloud to costmap conversion logic for outputting occupancy grids in Rust. Implementation details are contained [here](/src/rslidar/occupancy).
 ![costmap_demo](/demos/occupancy_grid.png)
 
 ## Recent Updates:
@@ -59,7 +59,7 @@ A brief overview on the Zenoh pub/sub elements in ```virtual-rgbd-sensor```:
 ### Publishers:
 1) ```rslidar/points/raw```: raw ```(x, y, z, intensity)``` point cloud from RoboSense LiDAR MSOP/DIFOP packets
 2) ```rslidar/points/segmented```: segmented ```(x, y, z, cluster_id)``` point cloud from ```segmentation.rs```'s two-layer-graph clustering
-3) ```rslidar/costmap```: occupancy grid containing free space, obstacle regions, and no information layers (from occlusion) from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
+3) ```rslidar/occupancy```: occupancy grid containing free space, obstacle regions, and no information layers (from occlusion) from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
 
 ### Subscribers:
 In ```zenoh_test.rs```, there are example point cloud and costmap subscribers in ```_points_subscriber``` and ```_costmap_subscriber```, respectively.

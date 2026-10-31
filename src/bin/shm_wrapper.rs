@@ -21,7 +21,7 @@ use virtual_rgbd_sensor::segmentation;
 use virtual_rgbd_sensor::rslidar_math::*;
 use virtual_rgbd_sensor::rslidar_sdk_node::{
     DriverConfig, RawPacket, RsHeliosDecoder, default_config_path,
-    parse_costmap_params, spawn_packet_source,
+    parse_costmap_params, parse_seg_params, spawn_packet_source,
 };
 
 use std::sync::mpsc;
@@ -195,6 +195,7 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
     };
     let cfg = DriverConfig::parse(&text);
     let costmap_params = parse_costmap_params(&text);
+    *seg_params.lock().unwrap() = parse_seg_params(&text);
 
     if cfg.lidar_type != "RSHELIOS" {
         eprintln!(

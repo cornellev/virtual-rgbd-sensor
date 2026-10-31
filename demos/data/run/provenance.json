@@ -1,0 +1,56 @@
+{
+  "kind": "cev-sim.headless.provenance",
+  "version": 1,
+  "runtimeName": "cev-sim",
+  "runtimeVersion": "0.2.0",
+  "gitHash": null,
+  "nodeVersion": "v22.22.2",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "backendSelections": [
+    {
+      "kind": 1,
+      "capabilityId": "rapier3d-swept-compound-v2",
+      "version": "0.19.3",
+      "configHash": "cb522d01c3c4af5762b83a5a506caeba4a504539fca3d1c1420f5d2d55cc84fb"
+    },
+    {
+      "kind": 2,
+      "capabilityId": "deterministic-state-sensors",
+      "version": "1",
+      "configHash": "dc27525458e0f720321213cd0a1abac8842266ae86f3d82172d8cda518924cf5"
+    },
+    {
+      "kind": 3,
+      "capabilityId": "deterministic-cpu-bvh-lidar",
+      "version": "2",
+      "configHash": "70349dfde6494414249bbcf6e1befc13ce82b817a63eb01baac4f5402ce62c31"
+    },
+    {
+      "kind": 4,
+      "capabilityId": "chromium-webgl2-rendered-sensors",
+      "version": "1",
+      "configHash": "cdbfea7d5698356687ca5820a6d54c932a815f199eb8a2b405b94fbe8183a5c1"
+    }
+  ],
+  "createdAt": "2026-10-24T23:08:04.019Z",
+  "execution": "managed-experiment",
+  "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+  "gpuRenderer": {
+    "renderer": "blank-analytic"
+  },
+  "plugins": [
+    {
+      "pluginId": "vendor.cornellev.dynamics",
+      "version": "0.1.0",
+      "packageHash": "2cdd0ec3f63bff348b5581c17d2bf828a37b3e7183ae3d52f3f2b4c73cae46d5",
+      "runtimeHash": "8a212ca6c210797c184614d2c6a124f5e4efdd52863a6999886be4e22f53afeb"
+    },
+    {
+      "pluginId": "vendor.robosense.helios32",
+      "version": "0.2.0",
+      "packageHash": "7a43d0de50aebb899c95e4383b1e8cdbd74e2c6619eb84f361ccb2a6df537843",
+      "runtimeHash": "c848d2c7347e150fff2eeed694a111f6ef5cdb259d12879017b0e21663734f02"
+    }
+  ]
+}

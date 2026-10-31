@@ -4,12 +4,14 @@
 #![allow(dead_code)]
 
 use virtual_rgbd_sensor::segmentation;
+use virtual_rgbd_sensor::config::{parse_costmap_params, parse_seg_params};
+use virtual_rgbd_sensor::rslidar_sdk_node::default_config_path;
 mod visualization;
 use visualization::{
     draw_origin_axes, drain_latest_cloud, drain_latest_costmap, drain_latest_pose, orbit_camera, setup_scene,
     toggle_color_mode, toggle_costmap, ShowCostmap, draw_vehicle,
     tune_seg_params, CloudChannel, CloudColorMode,
-    CostmapChannel, CostmapKind, CostmapView, LidarPose, OrbitCamera, PoseChannel, SegParamsHandle, SegParamsPublisher,
+    CostmapChannel, CostmapKind, CostmapView, LidarMountHeight, LidarPose, OrbitCamera, PoseChannel, SegParamsHandle, SegParamsPublisher,
     VizCostmap, VizPoint,
 };
 
@@ -136,7 +138,17 @@ fn decode_pose(payload: &[u8]) -> Option<(Vec3, Quat)> {
     ))
 }
 
+/// Usage: zenoh_viz [CONFIG_PATH]. Reads the same config.yaml as the wrapper
+/// for the LiDAR mount height and the starting seg params.
 fn main() {
+    let config_path = std::env::args().nth(1).unwrap_or_else(default_config_path);
+    let config_text = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
+        eprintln!("zenoh_test: failed to read config {config_path}: {e}");
+        std::process::exit(1)
+    });
+    let mount_height = parse_costmap_params(&config_text).sensor_z;
+    let seg_params = parse_seg_params(&config_text);
+
     let (viz_tx, viz_rx) = mpsc::channel::<Vec<VizPoint>>();
     let (costmap_tx, costmap_rx) = mpsc::channel::<(CostmapKind, VizCostmap)>();
     let (pose_tx, pose_rx) = mpsc::channel::<(Vec3, Quat)>();
@@ -220,7 +232,8 @@ fn main() {
         .insert_resource(CostmapChannel(Mutex::new(costmap_rx)))
         .insert_resource(PoseChannel(Mutex::new(pose_rx)))
         .insert_resource(OrbitCamera::default())
-        .insert_resource(SegParamsHandle(Arc::new(Mutex::new(segmentation::SegParams::default()))))
+        .insert_resource(SegParamsHandle(Arc::new(Mutex::new(seg_params))))
+        .insert_resource(LidarMountHeight(mount_height))
         .insert_resource(SegParamsPublisher(session.clone()))
         .init_resource::<CloudColorMode>()
         .init_resource::<ShowCostmap>()

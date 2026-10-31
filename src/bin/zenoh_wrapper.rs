@@ -26,7 +26,7 @@ use virtual_rgbd_sensor::tracking::{aggregate_clusters, relabel, Tracker};
 use virtual_rgbd_sensor::rslidar_math::*;
 use virtual_rgbd_sensor::rslidar_sdk_node::{
     DriverConfig, RawPacket, RsHeliosDecoder, default_config_path,
-    parse_costmap_params, spawn_packet_source,
+    parse_costmap_params, parse_seg_params, spawn_packet_source,
 };
 use virtual_rgbd_sensor::transform::{interpolate_pose, PoseBuffer, Transform};
 
@@ -366,8 +366,6 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let range_images = args.iter().any(|a| a == "--range-images");
     let config_path = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(default_config_path);
-    let seg_params = Arc::new(Mutex::new(segmentation::SegParams::default()));
-
     let text = match std::fs::read_to_string(&config_path) {
         Ok(t) => t,
         Err(e) => {
@@ -375,6 +373,7 @@ fn main() {
             std::process::exit(1)
         }
     };
+    let seg_params = Arc::new(Mutex::new(parse_seg_params(&text)));
     let mut global_map = costmap_2d::GlobalMap::new(&parse_costmap_params(&text));
     run_decoder(config_path, seg_params, &mut global_map, range_images);
 }

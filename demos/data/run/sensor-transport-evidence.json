@@ -1,0 +1,70 @@
+{
+  "kind": "cev-sim.sensor-transport-evidence",
+  "version": 1,
+  "bindings": [
+    {
+      "sensorId": "helios",
+      "productId": "packets",
+      "streamId": "msop",
+      "adapter": "pcap",
+      "endpointId": "helios-pcap-data"
+    },
+    {
+      "sensorId": "helios",
+      "productId": "packets",
+      "streamId": "difop",
+      "adapter": "pcap",
+      "endpointId": "helios-pcap-status"
+    }
+  ],
+  "wrappers": [
+    {
+      "endpointId": "helios-pcap-data",
+      "artifactId": "helios",
+      "mtu": 1500,
+      "ethernet": {
+        "sourceMac": "02:00:00:00:00:01",
+        "destinationMac": "02:00:00:00:00:02"
+      },
+      "ipv4": {
+        "sourceAddress": "192.0.2.1",
+        "destinationAddress": "192.0.2.2",
+        "ttl": 64
+      },
+      "udp": {
+        "sourcePort": 6699,
+        "destinationPort": 6699
+      }
+    },
+    {
+      "endpointId": "helios-pcap-status",
+      "artifactId": "helios",
+      "mtu": 1500,
+      "ethernet": {
+        "sourceMac": "02:00:00:00:00:01",
+        "destinationMac": "02:00:00:00:00:02"
+      },
+      "ipv4": {
+        "sourceAddress": "192.0.2.1",
+        "destinationAddress": "192.0.2.2",
+        "ttl": 64
+      },
+      "udp": {
+        "sourcePort": 7788,
+        "destinationPort": 7788
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "helios",
+      "fileName": "helios32.pcap",
+      "recordCount": 12909,
+      "payloadBytes": 16110432,
+      "firstLogicalEgressTimeNs": "100000002",
+      "lastLogicalEgressTimeNs": "8699333507",
+      "sizeBytes": 16859178,
+      "sha256": "b00f75712ab5ce7f7461bfc05e59c924a7af57403de01135451cc19ea9ab9f87"
+    }
+  ]
+}

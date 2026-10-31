@@ -391,8 +391,7 @@ impl RsHeliosDecoder {
         // the other seg_params read once per revolution below.
         let (height_filter_enabled, min_height) = {
             let p = self.seg_params.lock().unwrap();
-            // (p.height_filter_enabled, p.min_height)
-            (true, -0.6)
+            (p.height_filter_enabled, p.min_height)
 
         };
 
@@ -697,7 +696,15 @@ fn print_frame_stats(idx: u64, cloud: &PointCloud2) {
 }
 
 pub fn default_config_path() -> String {
+    // Launch and the car both set this to the directory that holds lidar.yaml.
+    // The compile-time path is only for `cargo run` inside this repo.
+    if let Some(dir) = std::env::var_os("CEV_CAR_DIR") {
+        return std::path::PathBuf::from(dir)
+            .join("lidar.yaml")
+            .to_string_lossy()
+            .into_owned();
+    }
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("src/rslidar/config/config.yaml");
-    p.to_string_lossy().to_string()
+    p.to_string_lossy().into_owned()
 }
