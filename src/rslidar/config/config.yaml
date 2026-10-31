@@ -60,7 +60,7 @@ costmap: # nav2 costmap.yaml names, see src/rslidar/node/costmap_2d.rs
   global_origin_y: -50.0
   sensor_x: 0.0                    #  rslidar position in the map frame
   sensor_y: 0.0
-  sensor_z: 0.6                  #  LiDAR mount height above the ground (m). The only place it's set:
+  sensor_z: 0.68                  #  LiDAR mount height above the ground (m). The only place it's set:
                                    #  the driver ground filter, costmap and zenoh_viz all derive from it
   height_filter_enabled: true      #  drop ground returns (below min_obstacle_height) in the driver, before segmentation
   min_obstacle_height: 0.0         #  above the ground (m); lower returns are treated as ground

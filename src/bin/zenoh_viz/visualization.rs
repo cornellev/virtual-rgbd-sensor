@@ -244,7 +244,7 @@ pub fn drain_latest_costmap(
     // height is set after so the LiDAR's own height isn't added to it.
     let local_center = Vec3::new(costmap.origin_x + width / 2.0, 0.0, -(costmap.origin_y + height / 2.0));
     let mut center = rotation * local_center + translation;
-    center.y = -mount.0;
+    center.y = pose.translation.y - mount.0;
     let placement = Transform::from_translation(center).with_rotation(rotation);
 
     let existing = query.single_mut().ok();
