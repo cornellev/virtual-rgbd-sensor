@@ -26,7 +26,9 @@ impl Default for SegParams {
         Self {
             seg_enabled: true,
             height_filter_enabled: false,
-            min_height: -0.6, // ceiling is a problem
+            // Sensor-frame z cut. Not set by hand: config::parse_seg_params
+            // derives it from config.yaml's min_obstacle_height - sensor_z.
+            min_height: f32::NEG_INFINITY,
             th_d: 0.01, th_z_deg: 15.0, th_v_base: 0.25, th_v_slope: 0.01, z_weight: 1.0,
             min_cluster_points: 3, min_gap_m: 1.0,
         }

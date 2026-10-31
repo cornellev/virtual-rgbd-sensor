@@ -1,0 +1,14 @@
+[package]
+name = "costmap_lifecycle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+rclrs = "*"
+lifecycle_msgs = "*"
+sensor_msgs = "*"
+
+[[bin]]
+name = "lifecycle_driver"
+path = "src/bin/lifecycle_driver.rs"

@@ -61,12 +61,13 @@ pub struct CostmapParams {
     pub global_origin_x: f32,
     pub global_origin_y: f32,
 
-    // sensor pose in the map frame (map -> base_link -> rslidar, translation only)
+    // sensor pose in the map frame (map -> base_link -> rslidar, translation only).
+    // sensor_z is the LiDAR's mount height above the ground.
     pub sensor_x: f32,
     pub sensor_y: f32,
     pub sensor_z: f32,
 
-    // obstacle_layer
+    // obstacle_layer; both heights are above the ground, not the LiDAR
     pub min_obstacle_height: f32,
     pub max_obstacle_height: f32,
     pub obstacle_max_range: f32,

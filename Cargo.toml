@@ -5,26 +5,31 @@ edition = "2024"
 autobins = false
 
 [features]
-viz = ["dep:bevy", "dep:bevy_points"]
+default = ["native"]
+native = ["dep:bevy", "dep:bevy_points", "dep:zenoh"]
+
+[dependencies]
+anyhow = "1"
+bevy = { version = "0.16", optional = true }
+bevy_points = { version = "0.8", optional = true }
+pcap-file = "2"
+nalgebra = "*"
+image = { version = "0.25", default-features = false, features = ["png"] }
+zenoh = { version = "1.10", features = ["shared-memory", "unstable"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
 name = "zenoh_wrapper"
 path = "src/bin/zenoh_wrapper.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "shm_wrapper"
 path = "src/bin/shm_wrapper.rs"
+required-features = ["native"]
 
 [[bin]]
 name = "zenoh_viz"
 path = "src/bin/zenoh_viz/main.rs"
-required-features = ["viz"]
-
-[dependencies]
-anyhow = "1"
-image = "0.25"
-pcap-file = "2"
-nalgebra = "*"
-zenoh = { version = "1.10", features = ["shared-memory", "unstable"] }
-bevy = { version = "0.16", optional = true }
-bevy_points = { version = "0.8", optional = true }
+required-features = ["native"]
