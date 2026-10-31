@@ -1,0 +1,265 @@
+{
+  "id": "run",
+  "name": "October 31 Testing Configuration: d04435b68e6a0bab24e27791909ce633915e20d1f19f64e6a1b196771ae303d8",
+  "createdAt": "2026-10-24T23:08:04.439Z",
+  "status": "complete",
+  "format": "sflog",
+  "version": 1,
+  "environmentId": "first-demo",
+  "profile": {
+    "kind": "fusion-log-profile",
+    "version": 1,
+    "id": "simulation-run-full-sensors",
+    "name": "Simulation Run: Full Sensors",
+    "mode": "replay-safe",
+    "rules": [
+      {
+        "pattern": "**",
+        "enabled": true,
+        "sampling": "on-change",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "simulation.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "vehicles.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "devices.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "candidate.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "active.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "oracle.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "diagnostics.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      },
+      {
+        "pattern": "visualization.**",
+        "enabled": true,
+        "sampling": "every-update",
+        "rateHz": null,
+        "_regex": {}
+      }
+    ]
+  },
+  "simulator": {
+    "status": "paused",
+    "time": 0,
+    "timeNs": 0,
+    "stepNs": 16666667,
+    "steps": 0,
+    "speed": 1,
+    "realtime": true,
+    "deterministic": true,
+    "modules": {
+      "inputs": true,
+      "physics": true,
+      "vehicles": true,
+      "sensors": true,
+      "controls": true,
+      "rendering": true,
+      "environment": true,
+      "scripting": true,
+      "baking": false,
+      "assertions": true
+    },
+    "maxSteps": null,
+    "activeRun": {
+      "manifestId": "oct-31-testing",
+      "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+      "simulationSemanticHash": "a97b6e13b72143f5aa65ab2ffaa4de61015e20d442f7897e737cfd06e5498f72"
+    },
+    "lifecycleState": "prepared",
+    "episodeHash": "d04435b68e6a0bab24e27791909ce633915e20d1f19f64e6a1b196771ae303d8",
+    "trajectoryHash": "8219de52b25c1a09bc1c2b49a11b21f2164bf1fb65ec1337c02786e2d005faf5",
+    "assertions": [],
+    "scenario": {
+      "active": true,
+      "scenarioId": "october-31-testing",
+      "resetSeed": "42",
+      "step": 0,
+      "timeNs": 0,
+      "status": "running",
+      "latestTrigger": null,
+      "nextTimedEvent": null,
+      "terminal": null,
+      "flags": {},
+      "outcomes": [
+        {
+          "id": "outcome-1",
+          "name": "No collisions",
+          "kind": "no-collisions",
+          "required": true,
+          "status": "pending",
+          "passed": null,
+          "detail": null
+        },
+        {
+          "id": "outcome-2",
+          "name": "Ego reaches a finish zone",
+          "kind": "finish-zone",
+          "required": true,
+          "status": "pending",
+          "passed": null,
+          "detail": null
+        }
+      ],
+      "collisionCount": 0,
+      "egoCollisionCount": 0,
+      "metrics": {
+        "route-progress": null,
+        "route-progress-ratio": null,
+        "off-road": null,
+        "wrong-way": null,
+        "kinematic-infeasibility": null,
+        "acceleration": null,
+        "jerk": null,
+        "log-divergence": null,
+        "failure": null
+      },
+      "metricEpisode": {
+        "route-progress": null,
+        "route-progress-ratio": null,
+        "off-road": null,
+        "wrong-way": null,
+        "kinematic-infeasibility": null,
+        "acceleration": null,
+        "jerk": null,
+        "log-divergence": null,
+        "failure": 0
+      },
+      "activeEffects": [],
+      "scriptErrors": []
+    },
+    "renderProvider": null
+  },
+  "appVersion": "0.2.0",
+  "gitHash": null,
+  "runId": "run-d04435b68e6a0bab",
+  "manifestId": "oct-31-testing",
+  "manifestRevision": null,
+  "definitionHash": "50bdb24ec44d4185d8210a7224c55f493beb0ccb5fe8e3e18300ef5249d57978",
+  "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+  "provenance": {
+    "kind": "cev-sim.headless.provenance",
+    "version": 1,
+    "runtimeName": "cev-sim",
+    "runtimeVersion": "0.2.0",
+    "gitHash": null,
+    "nodeVersion": "v22.22.2",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "backendSelections": [
+      {
+        "kind": 1,
+        "capabilityId": "rapier3d-swept-compound-v2",
+        "version": "0.19.3",
+        "configHash": "cb522d01c3c4af5762b83a5a506caeba4a504539fca3d1c1420f5d2d55cc84fb"
+      },
+      {
+        "kind": 2,
+        "capabilityId": "deterministic-state-sensors",
+        "version": "1",
+        "configHash": "dc27525458e0f720321213cd0a1abac8842266ae86f3d82172d8cda518924cf5"
+      },
+      {
+        "kind": 3,
+        "capabilityId": "deterministic-cpu-bvh-lidar",
+        "version": "2",
+        "configHash": "70349dfde6494414249bbcf6e1befc13ce82b817a63eb01baac4f5402ce62c31"
+      },
+      {
+        "kind": 4,
+        "capabilityId": "chromium-webgl2-rendered-sensors",
+        "version": "1",
+        "configHash": "cdbfea7d5698356687ca5820a6d54c932a815f199eb8a2b405b94fbe8183a5c1"
+      }
+    ],
+    "createdAt": "2026-10-24T23:08:04.019Z",
+    "execution": "managed-experiment",
+    "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+    "gpuRenderer": {
+      "renderer": "blank-analytic"
+    },
+    "plugins": [
+      {
+        "pluginId": "vendor.cornellev.dynamics",
+        "version": "0.1.0",
+        "packageHash": "2cdd0ec3f63bff348b5581c17d2bf828a37b3e7183ae3d52f3f2b4c73cae46d5",
+        "runtimeHash": "8a212ca6c210797c184614d2c6a124f5e4efdd52863a6999886be4e22f53afeb"
+      },
+      {
+        "pluginId": "vendor.robosense.helios32",
+        "version": "0.2.0",
+        "packageHash": "7a43d0de50aebb899c95e4383b1e8cdbd74e2c6619eb84f361ccb2a6df537843",
+        "runtimeHash": "c848d2c7347e150fff2eeed694a111f6ef5cdb259d12879017b0e21663734f02"
+      }
+    ]
+  },
+  "evidence": {
+    "kind": "cev-sim.log-evidence",
+    "version": 1,
+    "manifestId": "oct-31-testing",
+    "runId": "run-d04435b68e6a0bab",
+    "definitionHash": "50bdb24ec44d4185d8210a7224c55f493beb0ccb5fe8e3e18300ef5249d57978",
+    "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+    "simulationSemanticHash": "a97b6e13b72143f5aa65ab2ffaa4de61015e20d442f7897e737cfd06e5498f72",
+    "episodeHash": "d04435b68e6a0bab24e27791909ce633915e20d1f19f64e6a1b196771ae303d8",
+    "trajectoryHash": "c6f5145fc829a1aea32a1410ff06baf92dc2db5e6adfad4438e2911d8148b883",
+    "worldHash": "9cf3cf37dd92bbecae1deab6faf56b99b3f63c28aee0472fde1d9b0b9af33d53",
+    "calibrationHash": "780321430b4e233d63dbbe4108a3d3c6d508ec41cf2183d21ee023f83e46639c",
+    "suiteId": null,
+    "resultId": null,
+    "caseId": null,
+    "gitCommit": null,
+    "candidateModels": [],
+    "source": {
+      "status": "indexed",
+      "backfilled": false,
+      "warnings": []
+    }
+  },
+  "tags": [],
+  "folderId": null,
+  "incomplete": false,
+  "loggingError": null,
+  "completedAt": "2026-10-24T23:08:16.531Z",
+  "durationUs": 8616667,
+  "bytes": 10476813
+}

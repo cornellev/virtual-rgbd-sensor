@@ -1,0 +1,7 @@
+[package]
+name = "camera_lidar_fusion"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

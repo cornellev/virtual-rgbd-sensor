@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 use crate::costmap_2d;
+use crate::segmentation;
 
 /// Finds a `<key>: <value>` line anywhere in the file and returns the value
 /// with any trailing `# comment` stripped. Good enough for config.yaml's flat
@@ -112,5 +113,17 @@ pub fn parse_costmap_params(text: &str) -> costmap_2d::CostmapParams {
         clearing_az_res_deg: scalar_or(text, "clearing_az_res_deg", d.clearing_az_res_deg),
         inflation_radius: scalar_or(text, "inflation_radius", d.inflation_radius),
         cost_scaling_factor: scalar_or(text, "cost_scaling_factor", d.cost_scaling_factor),
+    }
+}
+/// Segmentation params with the driver's ground filter taken from config.yaml.
+/// The filter runs on raw sensor-frame z, so the above-ground
+/// min_obstacle_height is shifted down by the mount height (sensor_z).
+pub fn parse_seg_params(text: &str) -> segmentation::SegParams {
+    let d = segmentation::SegParams::default();
+    let costmap = parse_costmap_params(text);
+    segmentation::SegParams {
+        height_filter_enabled: scalar_or(text, "height_filter_enabled", d.height_filter_enabled),
+        min_height: costmap.min_obstacle_height - costmap.sensor_z,
+        ..d
     }
 }

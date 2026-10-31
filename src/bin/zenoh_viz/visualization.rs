@@ -164,10 +164,11 @@ pub struct CostmapPlane {
     size_y: usize,
 }
 
-/// Height (Bevy Y, i.e. LiDAR z) the costmap plane is drawn at. Just under
-/// the LiDAR by default; set it to minus the mount height to lay it on the
-/// ground points instead.
-const COSTMAP_PLANE_Y: f32 = -0.05;
+/// The LiDAR's mount height above the ground, config.yaml's `sensor_z`. The
+/// costmap plane is drawn at the ground (Bevy Y = -mount height) and the car
+/// box hangs this far below the LiDAR.
+#[derive(Resource, Clone, Copy)]
+pub struct LidarMountHeight(pub f32);
 
 /// Overall opacity of the costmap plane, like RViz's Map display "Alpha"
 /// (0.7 by default).
@@ -206,6 +207,7 @@ pub fn drain_latest_costmap(
     mut query: Query<(Entity, &CostmapPlane, &mut Transform)>,
     show: Res<ShowCostmap>,
     pose: Res<LidarPose>,
+    mount: Res<LidarMountHeight>,
     mut view: ResMut<CostmapView>,
 ) {
     {
@@ -242,7 +244,7 @@ pub fn drain_latest_costmap(
     // height is set after so the LiDAR's own height isn't added to it.
     let local_center = Vec3::new(costmap.origin_x + width / 2.0, 0.0, -(costmap.origin_y + height / 2.0));
     let mut center = rotation * local_center + translation;
-    center.y = COSTMAP_PLANE_Y;
+    center.y = -mount.0;
     let placement = Transform::from_translation(center).with_rotation(rotation);
 
     let existing = query.single_mut().ok();
@@ -319,20 +321,22 @@ const INCH: f32 = 0.0254;
 const CAR_LENGTH: f32 = 43.0 * INCH;
 const CAR_WIDTH: f32 = 22.5 * INCH;
 const CAR_HEIGHT: f32 = 15.5 * INCH;
-/// LiDAR mount in the car frame, metres: x forward, y up, z lateral (the same
-/// axes as Bevy). Car frame origin is the centre of the car's footprint on the
-/// ground.
-const LIDAR_IN_CAR: Vec3 = Vec3::new(-0.355, 0.609, 0.0);
+/// LiDAR mount in the car frame, metres: x forward, z lateral (the same axes
+/// as Bevy). Car frame origin is the centre of the car's footprint on the
+/// ground; the height (y) comes from `LidarMountHeight`.
+const LIDAR_IN_CAR_X: f32 = -0.355;
+const LIDAR_IN_CAR_Z: f32 = 0.0;
 
 /// Draws a wireframe box for the car and marks the LiDAR, both placed at the
 /// live `LidarPose` (world-frame, from `rslidar/pose_frame`) instead of
-/// assuming the LiDAR sits fixed at the scene origin. `LIDAR_IN_CAR` is still
+/// assuming the LiDAR sits fixed at the scene origin. `lidar_in_car` is still
 /// the car's rigid, unchanging offset from the LiDAR -- it's just rotated and
 /// translated by the current pose now, rather than being the whole answer.
-pub fn draw_vehicle(mut gizmos: Gizmos, pose: Res<LidarPose>) {
+pub fn draw_vehicle(mut gizmos: Gizmos, pose: Res<LidarPose>, mount: Res<LidarMountHeight>) {
+    let lidar_in_car = Vec3::new(LIDAR_IN_CAR_X, mount.0, LIDAR_IN_CAR_Z);
     let lidar_pos = pose.translation;
     let lidar_rot = pose.rotation;
-    let car_origin = lidar_pos + lidar_rot * (-LIDAR_IN_CAR);
+    let car_origin = lidar_pos + lidar_rot * (-lidar_in_car);
     let box_center = car_origin + Vec3::Y * (CAR_HEIGHT / 2.0);
     gizmos.cuboid(
         Transform::from_translation(box_center)
@@ -574,6 +578,7 @@ pub fn tune_seg_params(
     keys: Res<ButtonInput<KeyCode>>,
     handle: Res<SegParamsHandle>,
     publisher: Res<SegParamsPublisher>,
+    mount: Res<LidarMountHeight>,
 ) {
     const TH_D_STEP: f32 = 0.5;
     const TH_Z_STEP_DEG: f32 = 0.5;
@@ -661,11 +666,11 @@ pub fn tune_seg_params(
     }
     if changed {
         println!(
-            "rslidar: seg_enabled={} height_filter_enabled={} min_height={:.2}m th_d={:.3}m th_z={:.2}deg \
+            "rslidar: seg_enabled={} height_filter_enabled={} min_height={:.2}m ({:.2}m above ground) th_d={:.3}m th_z={:.2}deg \
              th_v_base={:.3}m th_v_slope={:.3} z_weight={:.3} min_cluster_points={} min_gap_m={:.3}  \
              ('g' seg_enabled, 'h' height_filter_enabled, 'j' 'k' min_height, '[' ']' th_d, ';' ''' th_z, \
              '-' '=' th_v_base, ',' '.' th_v_slope, '`' '\\' z_weight, '9' '0' min_cluster_points, 'n' 'm' min_gap_m)",
-            params.seg_enabled, params.height_filter_enabled, params.min_height,
+            params.seg_enabled, params.height_filter_enabled, params.min_height, params.min_height + mount.0,
             params.th_d, params.th_z_deg, params.th_v_base, params.th_v_slope, params.z_weight,
             params.min_cluster_points, params.min_gap_m
         );

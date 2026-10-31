@@ -6,38 +6,344 @@
 \usepackage{subcaption}
 \usepackage{hyperref}
 \usepackage[font=small]{caption}
+\usepackage{enumitem}
+\setlist{nosep}
 \graphicspath{{../figures/}}
 
-\title{ECE 4240 Midterm Project Report: LiDAR-Based ...}
+\title{ECE 4240: Virtual LiDAR Sensor via Wave Propagation Model}
 \author{Xueqing Tsang}
-\date{10/07/2026}
+\date{10/21/2026}
 
 \begin{document}
 \maketitle
 
 \section{Modeling and Simulating a Virtual LiDAR}
 The LiDAR (Light Detection and Ranging) is an active sensor that provides accurate depth and reflection strength measurements
-via continuous firing of laser beams. The density of depth and intensity data that a LiDAR can capture within a full revolution
-is dependent on its hardware configurations. Specifically, the LiDAR's channels define the specific angles and amount of laser beams
-fired within one instance, while the LiDAR's rpm defines the maximum amount of times that lasers are fired within a full revolution.
-In this paper, LiDAR channels are synonymous with vertical $\theta$ angle resolution and the set of vertical angles in which lasers are fired,
-while rpm is more geometrically interpretable if described as horizontal $\phi$ angle resolution. Then, it is very feasible to simulate the
-beam-pattern of LiDARs via a ray-caster model, especially if we define the LiDAR's body frame $\mathcal{F_{L}}$ to be in spherical coordinates:
+via continuous firing of laser pulses, which will be modeled as radiated waves. We consider the LiDAR sensor an active sounder whose
+measurements are governed by wave propagation phenomena. The sensor modeled is the RoboSense RS-Helios, a 32-channel, 905\,nm pulsed
+time-of-flight LiDAR. The resulting model is \emph{physics-based}: wave propagation sets the geometry (ray casting) and the radiometry
+(the LiDAR range equation). On top of it sits a \emph{probabilistic} measurement model for timing noise and dropout.
+The model is built in five stages:
 \begin{enumerate}
-    \item {
-        Define $\phi = 0$ and $\theta \in [\theta_{min}, \theta_{max}]$ as the initial angular sector formed by the set of laser beams fired
-        at $t = 0$.
-    }
-    \item {
-        Each laser beam is represented as a ray with its fired vertical angle $\theta$, horizontal angle $\phi$ and range $r$. In other words, 
-        given an environment with obstacles and surfaces, for each channel and azimuth, a ray is cast from origin of the LiDAR until
-        point of collision or sensor maximum range.   
-    }
-    \item {
-        Block sizes represent the total number of times a LiDAR fires before outputting the set of all corresponding rays. For every block 
-        outputted, we convert the associated rays into cartesian points and range graph elements.
-    }
+    \item wave propagation and the ray approximation (Section~\ref{sec:wave});
+    \item beam geometry and field of view (Section~\ref{sec:fov});
+    \item line-of-sight visibility via ray casting (Section~\ref{sec:los});
+    \item beam spreading, radiometry and echo detection (Sections~\ref{sec:beam}--\ref{sec:detect});
+    \item the probabilistic measurement model (Section~\ref{sec:prob}).
 \end{enumerate}
+
+\subsection{Wave Propagation and the Ray Approximation}\label{sec:wave}
+The emitted laser pulse is modeled as a solution of the wave equation $\partial_t^2 u = \upsilon^2 \nabla^2 u$ with $\upsilon = c$, the speed
+of light in air. We assume the targets lie in the emitter's far field, $r \gg$ the size of the emitting aperture, so the LiDAR can be treated
+as a point source at the sensor origin $\vec{0}$ (each of its 32 channels is such a point emitter). The radial coordinate
+$r = \|\vec{x}_T - \vec{0}\| = \sqrt{x_T^2 + y_T^2 + z_T^2}$ is the range from the sensor to a target at $\vec{x}_T \in \mathcal{W}$. For a wave
+spreading from a point source, the wave equation in spherical coordinates has the outgoing solution
+\begin{equation}\label{eq:spherical}
+    u(r,t) = \frac{1}{r} f_1(r - \upsilon t).
+\end{equation}
+Equation~\eqref{eq:spherical} gives the three physical principles the rest of the model is built on.
+
+\textbf{Time of flight.} The pulse shape $f_1$ travels outward unchanged at speed $\upsilon = c$. A pulse that reflects from a surface at range $r$
+and returns to the sensor arrives after the round-trip time $\tau$, so the range is measured as
+\begin{equation}\label{eq:tof}
+    \tau = \frac{2r}{c}, \qquad r = \frac{c\,\tau}{2}.
+\end{equation}
+
+\textbf{Spherical spreading.} The amplitude decays as $1/r$, so the intensity, $I \propto u^2$, decays as
+\begin{equation}\label{eq:spreading}
+    I(r) = I_0 \frac{r_0^2}{r^2},
+\end{equation}
+where $I_0$ is the intensity at reference distance $r_0$. Equivalently, the power crossing a sphere of area $4\pi r^2$ is conserved.
+If the medium were bounded by parallel planes a distance $h$ apart, spreading would instead be cylindrical, with $I(r) = I_0\, r_0 / r$.
+A LiDAR in open air has no such bounds, so the spherical law~\eqref{eq:spreading} applies to both the outgoing and the returning wave.
+
+\textbf{Rays.} The 905\,nm wavelength is at least $10^{5}$ times smaller than any object in the scene. In this high-frequency (geometric optics) limit,
+energy travels along rays normal to the wavefronts, which are straight lines in a homogeneous medium. This is what justifies simulating the
+LiDAR by \emph{ray casting} instead of solving the wave equation over the whole scene.
+
+\subsection{Beam Geometry and Field of View}\label{sec:fov}
+The density of depth and intensity data that the LiDAR captures in one revolution is set by its hardware configuration.
+The channels define the vertical angles $\theta$ at which beams are fired. The rpm defines how often the lasers fire per revolution,
+which sets the horizontal (azimuth) angle resolution $\Delta\phi$. Channel $c \in \{1,\dots,32\}$ has an elevation $\theta_c$, a
+horizontal calibration offset $\delta_c$, and a firing delay $\tau_c = 1.73\,(c-1)$\,$\mu$s within a block. These values are read from the
+physical unit's DIFOP packets (\texttt{VERT\_CENTIDEG}, \texttt{HORIZ\_CENTIDEG}, \texttt{FIRING\_TSS\_US}).
+
+A \emph{block} is one firing of all 32 channels and lasts $T_b = 55.56\,\mu$s. Successive blocks advance in azimuth by
+\begin{equation}\label{eq:dphi}
+    \Delta\phi = 360^\circ \cdot \frac{\text{rpm}}{60} \cdot T_b,
+\end{equation}
+which gives $0.1^\circ$, $0.2^\circ$ or $0.4^\circ$ at 300, 600 or 1200\,rpm. Channel $c$ of block $k$ fires at
+\begin{align}
+    t_{k,c} &= k\,T_b + \tau_c, \label{eq:tfire}\\
+    \phi^0_{k,c} &= k\,\Delta\phi + \Delta\phi\,\tau_c / T_b, \qquad \phi_{k,c} = \phi^0_{k,c} + \delta_c, \\
+    \vec{o}_{k,c} &= (0, 0, h) + R_x\left(\cos\phi^0_{k,c},\, -\sin\phi^0_{k,c},\, 0\right), \\
+    \vec{d}(\theta_c, \phi_{k,c}) &= \left(\cos\theta_c \cos\phi_{k,c},\; -\cos\theta_c \sin\phi_{k,c},\; \sin\theta_c\right). \label{eq:dir}
+\end{align}
+Here $h$ is the mount height and $R_x = 34.98$\,mm is the offset of the lens from the rotation axis. The sensor frame $\mathcal{F}_L$
+is x forward, y left, z up, and azimuth increases clockwise. The field of view is therefore the set
+\begin{equation}
+    \mathcal{F} = \left\{ (r, \theta, \phi) : \theta \in \{\theta_1, \dots, \theta_{32}\} \subset [-15.98^\circ, +9.99^\circ],\;
+    \phi \in [0^\circ, 360^\circ),\; r \in [r_{min}, r_{max}] \right\},
+\end{equation}
+with $[r_{min}, r_{max}] = [0.2, 150]$\,m. This gives a $360^\circ \times 26^\circ$ field of view with $360^\circ / \Delta\phi$ columns of 32 non-uniformly spaced rings: $0.5^\circ$ apart
+near the horizon and up to $3^\circ$ apart at the edges. The output follows the Helios's MSOP/DIFOP UDP packet encoding.
+Each MSOP packet holds 12 blocks, and each return is stored as a range quantized to 2.5\,mm and an 8-bit intensity.
+
+\subsection{Line-of-Sight Visibility}\label{sec:los}
+Each beam is cast as the ray $\vec{o} + t\vec{d}$, $t > 0$. The measured surface is the nearest intersection with any object $O_j$
+in the scene. Each object moves with velocity $\vec{v}_j$ and is evaluated at the beam's own firing time~\eqref{eq:tfire}:
+\begin{equation}\label{eq:los}
+    r^* = \min_j \left\{ t > 0 : \vec{o} - \vec{v}_j t_{k,c} + t\vec{d} \in \partial O_j \right\}, \qquad r^* \le r_{max}.
+\end{equation}
+Taking the minimum is what models occlusion: only the first surface along the line of sight is visible, and everything behind it is in shadow.
+Because the channels fire at different times, moving targets show the same rolling-shutter skew as on the real sensor.
+The intersection is solved analytically per primitive (ground plane, sphere, box slab test, or cylinder quadratic plus cap plane).
+Each hit returns the surface normal $\vec{n}$ and reflectivity $\rho$, which give the angle of incidence $\cos\alpha = |\vec{n} \cdot \vec{d}|$.
+
+\subsection{Beam Divergence: Spherical Spreading of the Footprint}\label{sec:beam}
+A real laser beam is not an infinitely thin ray. It is a narrow cone of half-angle $\gamma$, so the \emph{footprint} it illuminates grows with range.
+We model the transverse profile as Gaussian, with $1/e^2$ radius $w(r) = \gamma r$. The irradiance at transverse offset $\varrho$ from the beam axis is
+\begin{equation}\label{eq:gauss}
+    E(\varrho, r) = \frac{2 P_t}{\pi w(r)^2} \exp\!\left(-\frac{2\varrho^2}{w(r)^2}\right) e^{-\sigma r}
+                 = \frac{2 P_t}{\pi \gamma^2 r^2} \exp\!\left(-\frac{2\varrho^2}{\gamma^2 r^2}\right) e^{-\sigma r}.
+\end{equation}
+The peak irradiance falls as $1/r^2$: this is the spherical spreading law~\eqref{eq:spreading} applied to the outgoing beam, with a solid angle of $\pi\gamma^2$ instead of $4\pi$.
+
+The footprint is sampled with $N$ sub-rays on concentric rings (1, 6, 12, \dots) out to the $1/e^2$ radius, each cast as in~\eqref{eq:los}.
+Each sub-ray $i$ carries a fraction $w_i$ of the pulse energy, set by its Gaussian weight and footprint area and normalized so $\sum_i w_i = 1$.
+The default is a full-angle divergence $2\gamma = 3$\,mrad (an assumed value typical of 905\,nm spinning LiDARs) and $N = 19$ sub-rays.
+At 20\,m the footprint is then 6\,cm across. Setting $\gamma = 0$ recovers the ideal single-ray model.
+
+\subsection{Radiometry: the LiDAR Range Equation}\label{sec:radiometry}
+Sub-ray $i$ delivers power $w_i P_t e^{-\sigma r_i}$ to a surface patch at range $r_i$. A Lambertian surface of reflectivity $\rho$ re-radiates it
+with radiant intensity $\rho\, w_i P_t e^{-\sigma r_i} \cos\alpha_i / \pi$ toward the sensor. That return is itself a point source,
+and it spreads spherically~\eqref{eq:spreading} back to the receiver aperture $A_R$. The received power is the LiDAR range equation:
+\begin{equation}\label{eq:range}
+    P_i = \frac{P_t A_R}{\pi}\; w_i\, \frac{\rho_i \cos\alpha_i \, e^{-2\sigma r_i}}{r_i^2}
+        \;\propto\; w_i\, \frac{\rho_i \cos\alpha_i \, e^{-2\sigma r_i}}{r_i^2}.
+\end{equation}
+Each term has a physical origin:
+\begin{itemize}
+    \item $\rho\cos\alpha$: Lambertian reflection, which depends on the target's material and orientation;
+    \item $1/r^2$: spherical spreading of the Lambertian return;
+    \item $e^{-2\sigma r}$: two-way Beer--Lambert extinction by the atmosphere.
+\end{itemize}
+
+\textbf{Extended and partial targets.} When a target fills the footprint, $\sum_i w_i = 1$ and~\eqref{eq:range} reduces to $P \propto \rho\cos\alpha\, e^{-2\sigma r}/r^2$.
+A target narrower than the footprint instead intercepts a shrinking fraction $\sum w_i$ of the beam as range grows, so its return falls off faster
+and a partly hit edge returns a weaker, range-blended echo.
+
+\textbf{Koschmieder's law.} Fog, haze and aerosols scatter and absorb light along the path. Their extinction coefficient $\sigma$ is set from the
+meteorological visibility $V$ by Koschmieder's law,
+\begin{equation}
+    \sigma = \frac{3.912}{V},
+\end{equation}
+with $\sigma = 0$ in clear air. Through $e^{-2\sigma r}$ in~\eqref{eq:range}, poor visibility shortens the detection range. Points become sparser and
+fewer distant targets are seen. The effect is stronger for dark and oblique targets, whose $\rho\cos\alpha$ is already small.
+
+\subsection{Echo Formation and Detection}\label{sec:detect}
+The receiver records the returned pulse in time. It cannot separate contributions that arrive within one pulse width $\tau_p$ of each other,
+which corresponds to the range resolution
+\begin{equation}
+    \Delta R = \frac{c\,\tau_p}{2} = 0.75\,\text{m} \quad (\tau_p = 5\,\text{ns}).
+\end{equation}
+Sub-ray contributions within $\Delta R$ of each other merge into one echo $e$, with total power $P_e = \sum_{i\in e} P_i$ and the power-weighted range
+$r_e = \sum_{i\in e} P_i r_i / P_e$. This reproduces two real effects:
+\begin{itemize}
+    \item \emph{mixed pixels} at object edges, where foreground and background contributions blend;
+    \item \emph{range walk} on surfaces hit at grazing angles, where the footprint itself spans a range interval.
+\end{itemize}
+An echo is detectable only if its power clears the receiver's noise threshold, $P_e \ge P_{min}$. The threshold is calibrated so that a target with
+$\rho = 0.1$, at normal incidence and in clear air, is just detectable at $R_{10} = 110$\,m:
+\begin{equation}
+    P_{min} = \frac{0.1}{R_{10}^2}.
+\end{equation}
+For an extended target in clear air, this gives a closed-form maximum detection range that depends on the target's properties:
+\begin{equation}\label{eq:rdet}
+    r_{det}(\rho, \alpha) = R_{10}\sqrt{10\,\rho\cos\alpha}.
+\end{equation}
+In fog, $r_{det}$ is the root of $\rho\cos\alpha\, e^{-2\sigma r}/r^2 = P_{min}$. Our unit is configured in \emph{strongest-return} mode,
+so the strongest detectable echo is the one reported.
+
+\subsection{Probabilistic Measurement Model}\label{sec:prob}
+\textbf{Range noise.} The echo's time of flight~\eqref{eq:tof} is measured with Gaussian timing jitter, $\hat{\tau} = 2(r_e + b)/c + \sigma_t\,\epsilon$ with
+$\epsilon \sim \mathcal{N}(0,1)$, and the reported range is $\hat{r} = c\hat{\tau}/2$. Leading-edge timing jitter scales inversely with the signal-to-noise ratio,
+and the SNR is proportional to $P_e$. The range standard deviation is therefore
+\begin{equation}\label{eq:sigma}
+    \sigma_r(P_e) = \frac{c\,\sigma_t}{2} = \sqrt{\sigma_0^2 + \left(\sigma_{th}\frac{P_{min}}{P_e}\right)^2},
+\end{equation}
+with a floor $\sigma_0 = 2$\,cm for strong returns and $\sigma_{th} = 5$\,cm of extra noise at the detection threshold.
+Weak returns (far, dark, oblique or fogged targets) are thus noisier than strong ones. $\hat{r}$ is finally quantized to the protocol's 2.5\,mm,
+and each return is independently dropped with probability $p_{drop}$.
+
+\textbf{Intensity.} The reported intensity is range-compensated return power, which by~\eqref{eq:range} is the effective reflectivity:
+\begin{equation}
+    I = \operatorname{clamp}\!\left(100\, P_e\, r_e^2,\; 1,\; 255\right) = 100\,\rho\cos\alpha\, e^{-2\sigma r}\textstyle\sum_{i\in e} w_i.
+\end{equation}
+This puts diffuse surfaces at 0--100 and retroreflectors ($\rho > 1$) above 100.
+
+\textbf{Full measurement model.} The measurement for block $k$, channel $c$ is $z_{k,c} = (\hat{r}, I, \phi_{k,c}, \theta_c)$, produced by the
+deterministic chain~\eqref{eq:dir}$\to$\eqref{eq:los}$\to$\eqref{eq:range}$\to$ echo selection plus the timing-jitter and drop-probability noise above.
+Each sensor, environment and target variable enters $z$ through a specific term:
+\begin{itemize}
+    \item rpm sets the azimuth resolution~\eqref{eq:dphi}, and $h$ sets where the rings land on the ground, $\varrho_c = h/\tan|\theta_c|$;
+    \item visibility enters through $\sigma$;
+    \item reflectivity and incidence angle enter through $\rho\cos\alpha$, and target size relative to the footprint through $\sum w_i$;
+    \item target motion enters through $t_{k,c}$ in~\eqref{eq:los}.
+\end{itemize}
+
+\subsection{Simulation Implementation and Verification}
+The model is implemented in Rust (\texttt{lidar\_sim}). The ray casting, noise and packet-framing structure were adapted from ev-sim's LiDAR pipeline.
+The beam footprint, echo formation and SNR-dependent timing models of Sections~\ref{sec:beam}--\ref{sec:prob} were added on top.
+The simulator ray-traces a parking-lot scene containing ground ($\rho = 0.15$), a building, a wall, parked and moving cars (boxes),
+pedestrians and poles (cylinders), a retroreflective sign ($\rho = 2.5$) and a 0.5\,m calibration sphere. It writes the MSOP/DIFOP UDP stream the real
+Helios would send, as a \texttt{.pcap} file. That file is decoded by the same driver (\texttt{rslidar\_sdk\_node}) used for the physical sensor, so simulated
+and real scans pass through an identical pipeline.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Parameter & Symbol & Default \\
+\midrule
+Rotation rate & rpm & 300 (5\,Hz) \\
+Mount height & $h$ & 1.5\,m \\
+Beam divergence (full angle) & $2\gamma$ & 3\,mrad \\
+Footprint sub-rays & $N$ & 19 \\
+Pulse width & $\tau_p$ & 5\,ns ($\Delta R = 0.75$\,m) \\
+Range noise floor / at threshold & $\sigma_0$, $\sigma_{th}$ & 2\,cm, 5\,cm \\
+10\% target detection range & $R_{10}$ & 110\,m \\
+Range limits & $r_{min}$, $r_{max}$ & 0.2\,m, 150\,m \\
+Visibility & $V$ & $\infty$ \\
+\bottomrule
+\end{tabular}
+\caption{Simulation parameters (all settable from the command line).}
+\end{table}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.5\linewidth}p{0.42\linewidth}}
+\toprule
+Check (one revolution; range noise off except in fog rows) & Result \\
+\midrule
+Ideal ray ($\gamma = 0$), calibration sphere surface error & 0.52\,mm RMS \\
+3\,mrad footprint, calibration sphere surface error & 1.01\,mm RMS (limb mixed pixels) \\
+Footprint vs.\ ideal ray, median range change (same beams) & 0\,mm \\
+Footprint vs.\ ideal ray, returns changed by $>10$\,cm & 0.04\% (5--10\,m), 0.27\% (10--20\,m), 1.7\% (20--40\,m) \\
+Fog, $V = 50$\,m: maximum range & 35.7\,m $\to$ 23.3\,m \\
+Fog, $V = 50$\,m: retroreflector at 10\,m, intensity & 244 $\to$ 50 (matches $e^{-2\sigma r}$) \\
+\bottomrule
+\end{tabular}
+\caption{Verification of the simulated measurements against the known scene geometry.}
+\end{table}
+
+\subsection{Simulation Results}\label{sec:results}
+All figures are generated by \texttt{lidar\_sim/analysis/plots.py}. It runs the simulator once per experiment, decodes each \texttt{.pcap} with the
+same equations as the sensor driver, and overlays the analytic prediction from Sections~\ref{sec:wave}--\ref{sec:prob} (dashed lines) on the simulated
+measurements (markers). Each experiment changes one sensor-state, environment or target variable and holds the rest at the defaults.
+To isolate single variables, two test scenes complement the parking lot. Each places 60 targets around the sensor at geometrically spaced ranges
+from 2 to 160\,m, at sensor height, with no ground: the first uses flat plates large enough to fill the beam footprint, and the second uses 2\,cm-diameter poles.
+Detection ranges measured on these scenes are therefore resolved to one target step (7.6\%), shown as one-sided error bars.
+
+\textbf{Field of view and sensor state.} Figure~\ref{fig:fov} shows the 32-beam fan and the ground rings it produces.
+Every downward channel lands on a ring of radius $\varrho_c = h/\tan|\theta_c|$. Figure~\ref{fig:height} repeats this at three mount heights:
+the simulated ring radii stay within 1.5\% of the analytic value, and the blind circle around the sensor grows from 3.5\,m to 8.7\,m as $h$ goes from 1.0 to 2.5\,m.
+Figure~\ref{fig:rpm} varies the rotation rate. Neighbor spacing within a ring follows $\varrho\,\Delta\phi$ from~\eqref{eq:dphi}, and the number of points per
+revolution halves with each doubling of rpm (78.8k, 39.4k and 19.7k). Off-line points are pairs split by an object edge.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/sim/fov.pdf}
+\caption{Field of view. (a) Elevations of the 32 Helios channels, from $-15.98^\circ$ to $+9.99^\circ$, mounted at $h = 1.5$\,m.
+(b) Simulated ground returns from one revolution (blue), with the analytic ring radii $h/\tan|\theta_c|$ dashed. Gaps in the rings are shadows cast by objects.}
+\label{fig:fov}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.5\linewidth]{figures/sim/height.pdf}
+\caption{Ground ring radius per channel against $h/\tan|\theta_c|$, for three mount heights.}
+\label{fig:height}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/sim/rpm.pdf}
+\caption{Rotation rate. (a) Spacing between same-ring neighbors on the ground vs.\ horizontal range, against $\varrho\,\Delta\phi$. (b) Returns per revolution.}
+\label{fig:rpm}
+\end{figure}
+
+\textbf{Comparison with the physical sensor.} Figure~\ref{fig:real} decodes the simulated capture and a capture from our physical RS-Helios
+(\texttt{test\_cloud.pcap}) with the same driver. The two have the same structure: 300\,rpm, 32 rings $\times$ 3600 columns, 115{,}200 beams per revolution,
+the same ring order and calibration, and the same strongest-return packet format. The scenes differ, so the content differs.
+The real capture was taken indoors, so almost every beam hits something within 7\,m and 104.6k beams return per revolution.
+The simulated parking lot is open: its upward rings mostly see sky, so 78.8k beams return. The figure therefore validates the sensor's
+format, geometry and timing, not the scene.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/sim/sim_vs_real.pdf}
+\caption{Simulated vs.\ real capture, decoded by the same driver. (a, b) Range images of one revolution, each with its own color scale.
+(c) Fraction of beams returned per ring. (d) Returns per revolution out of 115{,}200 beams. The real capture is indoors and the simulated scene is an open parking lot.}
+\label{fig:real}
+\end{figure}
+
+\textbf{Target reflectivity and incidence.} Figure~\ref{fig:rho} sweeps the plate reflectivity at two incidence angles.
+The maximum detected range follows $r_{det} = R_{10}\sqrt{10\rho\cos\alpha}$ from~\eqref{eq:rdet} to within one target step. For example, at $\rho = 0.01$ the
+simulation detects to 33.6\,m against 34.8\,m predicted. Turning the plates to $\alpha = 60^\circ$ halves $\cos\alpha$ and shortens the range by $\sqrt{2}$ (77.8\,m predicted at $\rho = 0.1$, 76.1\,m simulated).
+Figure~\ref{fig:incidence} shows the reported intensity against $\cos\alpha$, computed from the scene geometry. Both the calibration sphere and the angled plates
+fall on $I = 100\rho\cos\alpha$, which is the Lambertian factor in~\eqref{eq:range}.
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/sim/reflectivity.pdf}
+\caption{Maximum detected range vs.\ reflectivity at normal ($\alpha = 0^\circ$) and oblique ($60^\circ$) incidence, in clear air.}
+\label{fig:rho}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/sim/incidence.pdf}
+\caption{Reported intensity vs.\ angle of incidence for the calibration sphere ($\rho = 0.8$) and plates turned 0--85$^\circ$ ($\rho = 0.5$).}
+\label{fig:incidence}
+\end{minipage}
+\end{figure}
+
+\textbf{Environment: fog.} Figure~\ref{fig:fog}(a) sweeps the visibility. The detection range follows the root of
+$\rho\, e^{-2\sigma r}/r^2 = P_{min}$ with $\sigma = 3.912/V$. For $\rho = 0.1$ it falls from 56.6\,m at $V = 400$\,m (60.7\,m predicted) to 7.1\,m at $V = 10$\,m (7.0\,m predicted).
+Bright targets lose range faster in absolute terms, but all targets converge to a few metres in dense fog. In the parking lot (b), the share of beams
+returned drops from 68\% in clear air to 7\% at $V = 10$\,m.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/sim/fog.pdf}
+\caption{Fog. (a) Maximum detected range vs.\ visibility for plates with $\rho = 0.1$ and 0.5, against the analytic detection range with Koschmieder extinction.
+(b) Share of beams returned in the parking-lot scene.}
+\label{fig:fog}
+\end{figure}
+
+\textbf{Measurement noise.} Figure~\ref{fig:noise} measures the range error against the exact plate geometry. Strong returns sit at the 2\,cm noise floor.
+As the received power approaches $P_{min}$, the timing jitter term in~\eqref{eq:sigma} takes over and the error grows. The noise reaches 4.6\,cm at 102\,m for $\rho = 0.1$,
+and at 49\,m for the darker $\rho = 0.02$, tracking $\sigma_r(P)$ throughout.
+
+\textbf{Target motion and line of sight.} Figure~\ref{fig:motion} follows a car driving past at 5\,m/s. In each frame its returns sit on its true pose at the
+moment those beams fired~\eqref{eq:tfire}. At $t = 1.9$\,s the parked car blocks the line of sight and no returns come back, as~\eqref{eq:los} requires.
+At $t = 3.0$\,s the car crosses the frame seam. The channels with $+14^\circ$ horizontal offsets sample it again 0.19\,s later, 1\,m further on, which is the
+rolling-shutter double image the real sensor also produces.
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/sim/noise.pdf}
+\caption{Standard deviation of the range error vs.\ range for plates with $\rho = 0.1$ and 0.02, against $\sigma_r(P)$ from~\eqref{eq:sigma}.}
+\label{fig:noise}
+\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}
+\includegraphics[width=\linewidth]{figures/sim/motion.pdf}
+\caption{A car moving at 5\,m/s over five frames: returns (dots) vs.\ true pose at firing time (dashed). It is occluded at $t = 1.9$\,s.}
+\label{fig:motion}
+\end{minipage}
+\end{figure}
 
 \section{Representation of Scans as a Range Graph}
 A range graph is a 2D array representation of a LiDAR scan, specifically encoding vertical and horizontal angle along with cartesian $(x, y, z)$ information 
@@ -45,26 +351,17 @@ of each laser beam in an ordered structure that models the LiDAR's hardware conf
 which contains 3D point of collision $(x, y, z)$, range $r$, and reflection intensity of a laser fired at vertical angle $\theta$ and horizontal angle $\phi$.
 
 \section{Two-Layer-Graph Clustering}
-Point cloud segmentation allows us to recreate obstacle regions and geometry through exploitation of LiDAR hardware configuration and the physical nature of 
-objects in 3D space. Obstacle regions can be used for tracking algorithms that better inform longer-horizon planning, along with point cloud compression and 
-cohesive visualization of the environment around the sensor platform. 
-
-"Two-Layer-Graph Clustering for Real-Time 3D LiDAR Point Cloud Segmentation" is a paper written by Yang, Wang, Lin, et. al on constructing range graphs given 
-prior knowledge of a LiDAR's beam firing patterns, then performing two seperate segmentations on given range graph for accurate and real-time clustering. 
+Point cloud segmentation allows us to recreate obstacle regions and geometry through exploitation of LiDAR hardware configuration and the physical nature of
+objects in 3D space. Obstacle regions can be used for tracking algorithms that better inform longer-horizon planning, along with point cloud compression and
+cohesive visualization of the environment around the sensor platform. "Two-Layer-Graph Clustering for Real-Time 3D LiDAR Point Cloud Segmentation" (Yang, Wang,
+Lin, et al.) constructs range graphs from prior knowledge of a LiDAR's beam firing pattern, then performs two separate segmentations on the range graph for
+accurate, real-time clustering.
 
 \textbf{First segmentation.} Clustering horizontally adjacent points to populate a set graph. This serves to significantly reduce the amount of points that need
 to be traversed and explored in the second segmentation by first conducting a parallelizable clustering among points within the same channel or vertical angle.
 
 \textbf{Second segmentation.} Merging vertically adjacent nodes via BFS or possible other graph traversal methods over a reduced set of set nodes. Given a SetNode,
-we search for vertically adjacent nodes that intersect with the current horizontal segment, as defined by RangeGraph node's $(\theta_{start}, \theta_{end})$. Specifically,
- 
-
-\begin{figure}[h]
-\centering
-\includegraphics[width=0.95\linewidth]{low.png}
-\caption{Training PL histogram with equal-frequency (left) and equal-width (right) bin edges, $K=20$.}
-\label{fig:disc}
-\end{figure}
+we search for vertically adjacent nodes that intersect with the current horizontal segment, as defined by RangeGraph node's $(\theta_{start}, \theta_{end})$.
 
 \section{KLT Tracking via Intensity-Depth Fusion}
 \textbf{Proposal.} The idea here is to simulate a form of camera-LiDAR sensor fusion without actually requiring synchronization between a physical camera and LiDAR.
@@ -73,17 +370,7 @@ prior to collision, and associated timestamps $t$, but also the reflection stren
 material of the surface that each laser beam collided with. As a result, we can essentially construct a sparse image of the environment around the sensor platform
 via an intensity map. This intensity map can be passed in with associated depth information to the KLT algorithm to perform some pseudo-optical flow on a sequence 
 of LiDAR scans.
-"The intensity measured by the LiDAR can be decomposed into four main factors under the Lambertian reflectance assumption: measurement  distance, the surface reflectance, 
-the strength of the incident ray, and the incident angle" (Dai et al.)
-
-The relationship intensity, distance to target or range, and the angle at which the signal strikes the target (angle of incidence) is encapsulated by the LiDAR intensity
-equation:
-$$ I(R, \alpha, \rho) \propto P_r(R, \alpha, \rho) = \eta(R) \frac{I_e \rho \cos(\alpha)}{R^2}, $$
-where $I_e$ denotes the laser's emission power, $R$ signifies the distance to the surface, $\alpha$ represents angle of incidence, and $\rho$ is the parameter indicating 
-the target's reflectivity. 
-The phenomenom of lens defocusing in LiDAR sensors results in a near-range effect $\eta(R)$ that impacts the intensity data at closer ranges ($R_n < 12 m$). This causes
-the intensity equation to be inapplicable within these proximities, and as a result, we will adopt a modeling approach for the near-range effect:
-$$ \eta(R) = 1 - exp{\frac{-2r_d^2(R + d)^2}{D^2 S^2}} $$
-with $r_d$ denoting the radius of the laser detector, $d$ representing the offset between the measured range and object range, $D$ is the diameter of the lens, and $S$
-signifies focal length, respectively. 
+"The intensity measured by the LiDAR can be decomposed into four main factors under the Lambertian reflectance assumption: measurement  distance, the surface reflectance,
+the strength of the incident ray, and the incident angle" (Dai et al.) -- the same dependence as the range equation~\eqref{eq:range} derived in Section~\ref{sec:radiometry}.
+At close range ($R < 12$\,m), lens defocusing additionally attenuates the reported intensity, which we would need to correct for before using it as a KLT feature.
 \end{document}

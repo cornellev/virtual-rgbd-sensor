@@ -391,8 +391,7 @@ impl RsHeliosDecoder {
         // the other seg_params read once per revolution below.
         let (height_filter_enabled, min_height) = {
             let p = self.seg_params.lock().unwrap();
-            // (p.height_filter_enabled, p.min_height)
-            (true, -0.6)
+            (p.height_filter_enabled, p.min_height)
 
         };
 

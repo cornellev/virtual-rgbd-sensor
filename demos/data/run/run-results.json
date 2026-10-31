@@ -1,0 +1,92 @@
+{
+  "kind": "cev-sim.run-result",
+  "version": 1,
+  "runId": "run-d04435b68e6a0bab",
+  "manifestId": "oct-31-testing",
+  "scenarioId": "october-31-testing",
+  "status": "passed",
+  "completed": true,
+  "passed": true,
+  "interrupted": false,
+  "resolvedHash": "1a81df0408a8f60644efe1b3d8863a95d8c28e97405d07ce6549b670d1a60b00",
+  "simulationSemanticHash": "a97b6e13b72143f5aa65ab2ffaa4de61015e20d442f7897e737cfd06e5498f72",
+  "episodeHash": "d04435b68e6a0bab24e27791909ce633915e20d1f19f64e6a1b196771ae303d8",
+  "trajectoryHash": "c6f5145fc829a1aea32a1410ff06baf92dc2db5e6adfad4438e2911d8148b883",
+  "step": "517",
+  "timeNs": "8616666839",
+  "terminationReason": "trigger",
+  "latestTrigger": {
+    "id": "trigger-1",
+    "name": "Finish Trigger",
+    "condition": "zone-enter",
+    "step": 517,
+    "timeNs": 8616666839,
+    "count": 1
+  },
+  "terminalEvent": {
+    "status": "completed",
+    "completed": true,
+    "reason": "trigger",
+    "sourceId": "trigger-1",
+    "detail": "Finish Trigger",
+    "step": 517,
+    "timeNs": 8616666839,
+    "latestTrigger": {
+      "id": "trigger-1",
+      "name": "Finish Trigger",
+      "condition": "zone-enter",
+      "step": 517,
+      "timeNs": 8616666839,
+      "count": 1
+    }
+  },
+  "assertions": [],
+  "outcomes": [
+    {
+      "id": "outcome-1",
+      "name": "No collisions",
+      "kind": "no-collisions",
+      "required": true,
+      "status": "passed",
+      "passed": true,
+      "detail": "0 collision transition(s)."
+    },
+    {
+      "id": "outcome-2",
+      "name": "Ego reaches a finish zone",
+      "kind": "finish-zone",
+      "required": true,
+      "status": "passed",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "metrics": {
+    "completed": 1,
+    "passed": 1,
+    "duration": 8.616666839,
+    "collision-count": 0,
+    "final-waypoint-distance": 1.1559949301567023,
+    "assertion-failures": 0,
+    "expected-outcome-failures": 0,
+    "route-progress": 13.07638425589691,
+    "route-progress-ratio": 0.9210572386940591,
+    "off-road": 0,
+    "wrong-way": 0,
+    "kinematic-infeasibility": 1,
+    "acceleration": 4.787863573716093,
+    "jerk": 275.497075935622,
+    "log-divergence": null,
+    "failure": 0
+  },
+  "failureReason": null,
+  "degraded": false,
+  "artifactWarnings": [],
+  "diagnostics": {
+    "gpuRenderer": {
+      "renderer": "blank-analytic"
+    }
+  },
+  "completedAt": "2026-10-24T23:08:16.504Z",
+  "experimentMetrics": {}
+}
