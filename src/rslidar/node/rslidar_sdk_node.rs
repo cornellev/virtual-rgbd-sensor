@@ -104,7 +104,7 @@ fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Wire format published on `rslidar/costmap`: a 32-byte header (stamp_sec:
+/// Wire format published on `cev/mapping/costmap`: a 32-byte header (stamp_sec:
 /// i32, stamp_nanosec: u32, size_x: u32, size_y: u32, resolution: f32,
 /// origin_x: f32, origin_y: f32, reserved: u32, all little-endian) followed by
 /// `size_x * size_y` row-major u8 costs (0 free .. 253 inscribed, 254 lethal,
@@ -1055,12 +1055,12 @@ fn run_decoder(config_path: String, seg_params: Arc<Mutex<segmentation::SegParam
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
-    let pub_seg = publisher(&session, "rslidar/points/segmented").unwrap_or_else(|error| {
+    let pub_seg = publisher(&session, "cev/sensors/lidar/segmented_points").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });
 
-    let pub_costmap = publisher(&session, "rslidar/costmap").unwrap_or_else(|error| {
+    let pub_costmap = publisher(&session, "cev/mapping/costmap").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
     });

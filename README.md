@@ -49,8 +49,8 @@ If you want to run ```rslidar_sdk_node``` on online LiDAR via MSOP/DIFOP ports, 
 A brief overview on the Zenoh pub/sub elements in ```virtual-rgbd-sensor```:
 ### Publishers:
 1) ```rslidar/points/raw```: raw ```(x, y, z, intensity)``` point cloud from RoboSense LiDAR MSOP/DIFOP packets
-2) ```rslidar/points/segmented```: segmented ```(x, y, z, cluster_id)``` point cloud from ```segmentation.rs```'s two-layer-graph clustering
-3) ```rslidar/costmap```: occupancy grid containing free space, obstacle regions, and inflation layers from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
+2) ```cev/sensors/lidar/segmented_points```: segmented ```(x, y, z, cluster_id)``` point cloud from ```segmentation.rs```'s two-layer-graph clustering
+3) ```cev/mapping/costmap```: occupancy grid containing free space, obstacle regions, and inflation layers from Rust implementation of ```ros-planning costmap_2d``` in ```/costmap```
 
 ### Subscribers:
 In ```zenoh_test.rs```, there are example point cloud and costmap subscribers in ```_points_subscriber``` and ```_costmap_subscriber```, respectively.

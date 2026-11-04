@@ -67,7 +67,7 @@ pub fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut
     ));
 }
 
-/// One costmap as published on `rslidar/costmap` (see `encode_costmap` in
+/// One costmap as published on `cev/mapping/costmap` (see `encode_costmap` in
 /// rslidar_sdk_node.rs): row-major u8 costs, cell (0, 0) at
 /// (`origin_x`, `origin_y`) in the LiDAR frame.
 pub struct VizCostmap {

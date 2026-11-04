@@ -19,15 +19,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 
-const POINTS_KEY: &str = "rslidar/points/segmented";
-const COSTMAP_KEY: &str = "rslidar/costmap";
+const POINTS_KEY: &str = "cev/sensors/lidar/segmented_points";
+const COSTMAP_KEY: &str = "cev/mapping/costmap";
 static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Mirrors `encode_points`/`build_segmented_data` in rslidar_sdk_node.rs: a
 /// 16-byte header (stamp_sec: i32, stamp_nanosec: u32, width: u32,
 /// point_step: u32, all little-endian) followed by `width` records of
 /// `point_step` bytes each -- XYZI (16 bytes, `rslidar/points/raw`) or XYZI +
-/// a trailing i32 cluster id (20 bytes, `rslidar/points/segmented`).
+/// a trailing i32 cluster id (20 bytes, `cev/sensors/lidar/segmented_points`).
 fn decode_points(payload: &[u8]) -> Option<Vec<VizPoint>> {
     if payload.len() < 16 {
         return None;
