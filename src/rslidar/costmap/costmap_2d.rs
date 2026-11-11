@@ -41,6 +41,14 @@ impl std::str::FromStr for ClearMode {
         }
     }
 }
+
+/// struct for occ grid differences in global map
+pub struct Diff {
+    pub mx: u16,
+    pub my: u16,
+    pub old: u8,
+    pub new: u8,
+}
 /// Same parameter names/meaning as the nav2 costmap.yaml
 /// (costmap_lifecycle/costmap.yaml), flattened.
 #[derive(Clone, Copy, Debug)]
@@ -267,6 +275,7 @@ pub struct GlobalMap {
     /// Where the lidar sits in the local map's own coordinates.
     sensor_x: f32,
     sensor_y: f32,
+    pending: Vec<Diff>
 }
 
 impl GlobalMap {
@@ -279,11 +288,16 @@ impl GlobalMap {
             ),
             sensor_x: params.sensor_x,
             sensor_y: params.sensor_y,
+            pending: Vec::new()
         }
     }
 
     pub fn grid(&self) -> &Costmap2D {
         &self.grid
+    }
+
+    pub fn take_diff(&mut self) -> Vec<Diff> {
+        std::mem::take(&mut self.pending)
     }
 
     /// Fuses `local` (lidar frame, just updated) using `tf` = lidar -> world.
@@ -306,6 +320,7 @@ impl GlobalMap {
         };
 
         let g = &mut self.grid;
+        let pending = &mut self.pending;
         let (x0, y0) = (l.origin_x + region.min_x as f32 * l.resolution, l.origin_y + region.min_y as f32 * l.resolution);
         let (x1, y1) = (l.origin_x + region.max_x as f32 * l.resolution, l.origin_y + region.max_y as f32 * l.resolution);
         let corners = [to_world(x0, y0), to_world(x1, y0), to_world(x0, y1), to_world(x1, y1)];
@@ -348,8 +363,14 @@ impl GlobalMap {
             for gx in gx0 + first..gx0 + last {
                 if u >= u_min && u < u_max && v >= v_min && v < v_max {
                     let c = l.data[v as usize * l.size_x + u as usize];
-                    if c != NO_INFORMATION {
-                        g.data[row + gx] = c;
+                    let i = row + gx;
+                    let old = g.data[i];
+                    if c != NO_INFORMATION && c != old {
+                        g.data[i] = c;
+                        // we don't store -> NO_INFORMATION, cuz that is unncesscary
+                        pending.push(Diff{
+                            mx: gx as u16, my: gy as u16, old, new: c
+                        });
                     }
                 }
                 u += du;

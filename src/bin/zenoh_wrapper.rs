@@ -19,7 +19,7 @@ const POSE_BUFFER_LEN: usize = 1024;
 const GLOBAL_PUBLISH_EVERY: u64 = 10;
 
 use anyhow::Result;
-use virtual_rgbd_sensor::costmap_2d;
+use virtual_rgbd_sensor::costmap_2d::{self, Diff};
 use virtual_rgbd_sensor::segmentation;
 use virtual_rgbd_sensor::visualize::*;
 use virtual_rgbd_sensor::tracking::{aggregate_clusters, relabel, Tracker};
@@ -102,6 +102,23 @@ fn encode_costmap(header: &Header, map: &costmap_2d::Costmap2D) -> Vec<u8> {
     buf.extend_from_slice(&map.data);
     buf
 }
+
+// encode costmap as bits: stamp_sec: i32 + stamp_nanosec: u32 + len: u32
+// + diffs: len * (u16 + u16 + u8 + u8) (mx, my, old, new)
+fn encode_diff(header: &Header, diff: &[Diff]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + diff.len() * 6);
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
+    buf.extend_from_slice(&(diff.len() as u32).to_le_bytes());
+    for d in diff {
+        buf.extend_from_slice(&d.mx.to_le_bytes());
+        buf.extend_from_slice(&d.my.to_le_bytes());
+        buf.push(d.old);
+        buf.push(d.new);
+    }
+    buf
+}
+
 
 /// `cloud_data`'s XYZI points (see `POINT_STEP`) with each point's cluster id
 /// from `point_cluster` appended as a trailing little-endian i32 (-1 for
@@ -231,6 +248,11 @@ fn run_decoder(
         std::process::exit(1)
     });
 
+    let pub_diff = publisher(&session, "cev/sensors/lidar/occupancy_grid/diff").unwrap_or_else(|error| {
+        eprintln!("rslidar: {error}");
+        std::process::exit(1)
+    });
+
     let pub_pose_frame = publisher(&session, "cev/sensors/pose_frame").unwrap_or_else(|error| {
         eprintln!("rslidar: {error}");
         std::process::exit(1)
@@ -352,6 +374,12 @@ fn run_decoder(
                             .put(encode_costmap(&cloud.header, global_map.grid()))
                             .wait() {
                             eprintln!("rslidar: publish global costmap: {error}");
+                        }
+                        let diff = global_map.take_diff(); // getting Vec<Diff> for diff
+                        if let Err(error) = pub_diff
+                            .put(encode_diff(&cloud.header, &diff))
+                            .wait() {
+                            eprintln!("rslidar: publish occupancy diff: {error}");
                         }
                     }
                     println!("output (costmap update {costmap_ms:.2} ms, global fuse {global_ms:.2} ms)")
