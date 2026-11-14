@@ -18,10 +18,21 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 zenoh = { version = "1.10", features = ["shared-memory", "unstable"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+prost = "0.14"
+bytes = "1"
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"
 
 [[bin]]
 name = "zenoh_wrapper"
 path = "src/bin/zenoh_wrapper.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "zenoh_protobuf"
+path = "src/bin/zenoh_protobuf.rs"
 required-features = ["native"]
 
 [[bin]]

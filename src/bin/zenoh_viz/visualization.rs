@@ -10,8 +10,12 @@ use bevy_points::prelude::*;
 use bevy_points::material::PointsShaderSettings;
 
 use crate::segmentation::{SEG_PARAMS_KEY, SegParams};
+use virtual_rgbd_sensor::cev_proto::{self as pb, Message};
 use zenoh::Wait;
 
+use nalgebra::{Quaternion as NQuaternion, UnitQuaternion as NUnitQuaternion, Vector3 as NVector3};
+
+use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,13 +26,214 @@ pub const INSCRIBED_INFLATED_OBSTACLE: usize = 253;
 pub const FREE_SPACE: usize = 0;
 
 /// one clustered point from the point cloud
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct VizPoint {
     pub x: f32,
     pub y: f32,
     pub z: f32,
     pub cluster: i32,
     pub intensity: f32
+}
+
+/// Parses `width` packed point records of `point_step` bytes each: x, y, z,
+/// intensity (f32), plus a trailing i32 cluster id when `point_step >= 20`,
+/// all little-endian. NaN points (non-dense clouds) are skipped.
+pub fn parse_point_records(data: &[u8], width: usize, point_step: usize) -> Option<Vec<VizPoint>> {
+    if point_step < 16 || data.len() < width * point_step {
+        return None;
+    }
+    let has_cluster = point_step >= 20;
+    let f32_at = |rec: &[u8], i: usize| f32::from_le_bytes(rec[i..i + 4].try_into().unwrap());
+    Some(
+        data.chunks_exact(point_step)
+            .take(width)
+            .filter_map(|rec| {
+                let (x, y, z) = (f32_at(rec, 0), f32_at(rec, 4), f32_at(rec, 8));
+                if x.is_nan() || y.is_nan() || z.is_nan() {
+                    return None;
+                }
+                let cluster = if has_cluster { i32::from_le_bytes(rec[16..20].try_into().unwrap()) } else { -1 };
+                Some(VizPoint { x, y, z, cluster, intensity: f32_at(rec, 12) })
+            })
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// protobuf (cev-interfaces lidar.proto) decoding, for `zenoh_viz --proto`.
+// Each decoder checks the message against what the proto comments promise
+// and returns why it's malformed instead of silently dropping it, so this
+// doubles as a test of the protobuf messages.
+// ---------------------------------------------------------------------------
+
+/// Sanity-checks the `Header` on every message of one topic: present, a
+/// nonzero stamp and frame id, and `seq` increasing by one each message
+/// (gaps are expected occasionally -- the publishers drop under
+/// congestion -- so they're logged, not treated as errors).
+pub struct HeaderCheck {
+    key: &'static str,
+    last_seq: Mutex<Option<u64>>,
+}
+
+impl HeaderCheck {
+    pub fn new(key: &'static str) -> Self {
+        Self { key, last_seq: Mutex::new(None) }
+    }
+
+    pub fn check(&self, header: Option<&pb::Header>) {
+        let key = self.key;
+        let Some(h) = header else {
+            eprintln!("proto [{key}]: message has no header");
+            return;
+        };
+        if h.stamp_ns == 0 {
+            eprintln!("proto [{key}]: header.stamp_ns is 0");
+        }
+        if h.frame_id.is_empty() {
+            eprintln!("proto [{key}]: header.frame_id is empty");
+        }
+        let mut last = self.last_seq.lock().unwrap();
+        match *last {
+            None => println!(
+                "proto [{key}]: first message, seq={} frame_id={:?} stamp_ns={}",
+                h.seq, h.frame_id, h.stamp_ns
+            ),
+            Some(prev) if h.seq == prev + 1 => {}
+            Some(prev) if h.seq > prev => {
+                eprintln!("proto [{key}]: seq {prev} -> {} ({} dropped)", h.seq, h.seq - prev - 1)
+            }
+            Some(prev) => eprintln!("proto [{key}]: seq went back {prev} -> {} (publisher restarted?)", h.seq),
+        }
+        *last = Some(h.seq);
+    }
+}
+
+/// `PointCloud` on `cev/sensors/lidar/{raw,segmented}_points`.
+pub fn proto_decode_points(payload: &[u8]) -> Result<(Option<pb::Header>, Vec<VizPoint>), String> {
+    let msg = pb::PointCloud::decode(payload).map_err(|e| format!("PointCloud: {e}"))?;
+    let (width, step) = (msg.width as usize, msg.point_step as usize);
+    if step != 16 && step != 20 {
+        return Err(format!("PointCloud: point_step {step}, expected 16 (raw) or 20 (segmented)"));
+    }
+    if msg.data.len() != width * step {
+        return Err(format!(
+            "PointCloud: data is {} bytes, width {width} * point_step {step} = {}",
+            msg.data.len(),
+            width * step
+        ));
+    }
+    let points = parse_point_records(&msg.data, width, step).expect("sizes checked above");
+    Ok((msg.header, points))
+}
+
+/// `OccupancyGrid` on `cev/sensors/lidar/occupancy_grid/{local,global}`.
+pub fn proto_decode_costmap(payload: &[u8]) -> Result<(Option<pb::Header>, VizCostmap), String> {
+    let msg = pb::OccupancyGrid::decode(payload).map_err(|e| format!("OccupancyGrid: {e}"))?;
+    let (size_x, size_y) = (msg.size_x as usize, msg.size_y as usize);
+    if size_x == 0 || size_y == 0 {
+        return Err(format!("OccupancyGrid: empty grid {size_x}x{size_y}"));
+    }
+    if msg.data.len() != size_x * size_y {
+        return Err(format!(
+            "OccupancyGrid: data is {} bytes, size_x * size_y = {}",
+            msg.data.len(),
+            size_x * size_y
+        ));
+    }
+    if !(msg.resolution_m > 0.0) {
+        return Err(format!("OccupancyGrid: resolution_m {} must be > 0", msg.resolution_m));
+    }
+    Ok((
+        msg.header,
+        VizCostmap {
+            size_x,
+            size_y,
+            resolution: msg.resolution_m,
+            origin_x: msg.origin_x,
+            origin_y: msg.origin_y,
+            data: msg.data.to_vec(),
+        },
+    ))
+}
+
+/// `Transform` on `cev/sensors/pose_frame`, still in the lidar's REP-103
+/// axes (main.rs remaps it into Bevy's).
+pub fn proto_decode_pose(
+    payload: &[u8],
+) -> Result<(Option<pb::Header>, (NVector3<f32>, NUnitQuaternion<f32>)), String> {
+    let msg = pb::Transform::decode(payload).map_err(|e| format!("Transform: {e}"))?;
+    let t = msg.translation.ok_or("Transform: no translation")?;
+    let q = msg.rotation.ok_or("Transform: no rotation")?;
+    let norm = (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt();
+    if (norm - 1.0).abs() > 1e-3 {
+        return Err(format!("Transform: rotation not a unit quaternion (|q| = {norm})"));
+    }
+    Ok((
+        msg.header,
+        (
+            NVector3::new(t.x as f32, t.y as f32, t.z as f32),
+            NUnitQuaternion::from_quaternion(NQuaternion::new(q.w as f32, q.x as f32, q.y as f32, q.z as f32)),
+        ),
+    ))
+}
+
+/// What `proto_decode_range_graph` found in a `RangeGraph` (nothing draws it
+/// yet, so it's just logged).
+pub struct RangeGraphStats {
+    pub num_rings: u32,
+    pub num_cols: u32,
+    pub azimuth_resolution_centideg: u32,
+    pub valid: usize,
+    pub clusters: usize,
+}
+
+/// `RangeGraph` on `cev/sensors/lidar/range_graph`.
+pub fn proto_decode_range_graph(payload: &[u8]) -> Result<(Option<pb::Header>, RangeGraphStats), String> {
+    let msg = pb::RangeGraph::decode(payload).map_err(|e| format!("RangeGraph: {e}"))?;
+    let expected = msg.num_rings as usize * msg.num_cols as usize;
+    if msg.nodes.len() != expected {
+        return Err(format!(
+            "RangeGraph: {} nodes, num_rings {} * num_cols {} = {expected}",
+            msg.nodes.len(),
+            msg.num_rings,
+            msg.num_cols
+        ));
+    }
+    if msg.azimuth_resolution_centideg == 0 || msg.num_cols * msg.azimuth_resolution_centideg != 36000 {
+        return Err(format!(
+            "RangeGraph: num_cols {} * azimuth_resolution_centideg {} != 36000",
+            msg.num_cols, msg.azimuth_resolution_centideg
+        ));
+    }
+    let valid: Vec<&pb::RangeNode> = msg.nodes.iter().filter(|n| n.valid).collect();
+    let clusters: HashSet<i32> = valid.iter().map(|n| n.beta).filter(|&b| b >= 0).collect();
+    Ok((
+        msg.header,
+        RangeGraphStats {
+            num_rings: msg.num_rings,
+            num_cols: msg.num_cols,
+            azimuth_resolution_centideg: msg.azimuth_resolution_centideg,
+            valid: valid.len(),
+            clusters: clusters.len(),
+        },
+    ))
+}
+
+/// `OccupancyGridDiff` on `cev/sensors/lidar/occupancy_grid/diff`, as
+/// (mx, my, old, new) cells.
+pub fn proto_decode_diff(payload: &[u8]) -> Result<(Option<pb::Header>, Vec<(u32, u32, u8, u8)>), String> {
+    let msg = pb::OccupancyGridDiff::decode(payload).map_err(|e| format!("OccupancyGridDiff: {e}"))?;
+    let diffs = msg
+        .diffs
+        .iter()
+        .map(|d| {
+            let cost = |v: u32, name: &str| {
+                u8::try_from(v).map_err(|_| format!("OccupancyGridDiff: {name} = {v} at ({}, {}), must be 0-255", d.mx, d.my))
+            };
+            Ok((d.mx, d.my, cost(d.old, "old")?, cost(d.new, "new")?))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((msg.header, diffs))
 }
 
 /// Wraps the receiving end of the decoder -> visualizer channel as a Bevy
@@ -677,5 +882,102 @@ pub fn tune_seg_params(
         if let Err(error) = publisher.0.put(SEG_PARAMS_KEY, params.to_bytes()).wait() {
             eprintln!("visualization: publish seg params: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod proto_tests {
+    use super::*;
+
+    fn header() -> Option<pb::Header> {
+        Some(pb::Header::new(1_700_000_000_123_456_789, "world", 7))
+    }
+
+    #[test]
+    fn points_round_trip() {
+        let mut data = Vec::new();
+        for (x, y, z, i, c) in [(1.0f32, 2.0f32, 3.0f32, 40.0f32, 5i32), (f32::NAN, 0.0, 0.0, 0.0, -1), (-1.0, -2.0, 0.5, 9.0, -1)] {
+            for v in [x, y, z, i] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+            data.extend_from_slice(&c.to_le_bytes());
+        }
+        let msg = pb::PointCloud { header: header(), width: 3, point_step: 20, data: data.into() };
+        let (h, pts) = proto_decode_points(&msg.encode_to_vec()).unwrap();
+        assert_eq!(h, header());
+        assert_eq!(pts.len(), 2, "NaN point skipped");
+        assert_eq!((pts[0].x, pts[0].y, pts[0].z, pts[0].intensity, pts[0].cluster), (1.0, 2.0, 3.0, 40.0, 5));
+        assert_eq!(pts[1].cluster, -1);
+
+        let bad = pb::PointCloud { width: 4, ..msg };
+        assert!(proto_decode_points(&bad.encode_to_vec()).unwrap_err().contains("width 4"));
+    }
+
+    #[test]
+    fn costmap_round_trip() {
+        let msg = pb::OccupancyGrid {
+            header: header(),
+            size_x: 3,
+            size_y: 2,
+            resolution_m: 0.1,
+            origin_x: -1.5,
+            origin_y: 2.0,
+            data: vec![0, 1, 252, 253, 254, 255].into(),
+        };
+        let (h, c) = proto_decode_costmap(&msg.encode_to_vec()).unwrap();
+        assert_eq!(h, header());
+        assert_eq!((c.size_x, c.size_y, c.resolution, c.origin_x, c.origin_y), (3, 2, 0.1, -1.5, 2.0));
+        assert_eq!(c.data, vec![0, 1, 252, 253, 254, 255]);
+
+        let bad = pb::OccupancyGrid { size_y: 3, ..msg };
+        assert!(proto_decode_costmap(&bad.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn pose_round_trip() {
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let msg = pb::Transform {
+            header: header(),
+            translation: Some(pb::Vector3 { x: 1.0, y: -2.0, z: 0.25 }),
+            rotation: Some(pb::Quaternion { x: 0.0, y: 0.0, z: s, w: s }), // 90 deg yaw
+        };
+        let (h, (t, r)) = proto_decode_pose(&msg.encode_to_vec()).unwrap();
+        assert_eq!(h, header());
+        assert_eq!((t.x, t.y, t.z), (1.0, -2.0, 0.25));
+        assert!((r.angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+
+        let bad = pb::Transform { rotation: Some(pb::Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 2.0 }), ..msg };
+        assert!(proto_decode_pose(&bad.encode_to_vec()).unwrap_err().contains("unit quaternion"));
+    }
+
+    #[test]
+    fn range_graph_round_trip() {
+        let (rings, cols) = (2u32, 3600u32);
+        let mut nodes = vec![pb::RangeNode::default(); (rings * cols) as usize];
+        nodes[0] = pb::RangeNode { valid: true, beta: 3, range: 4.0, ..Default::default() };
+        nodes[1] = pb::RangeNode { valid: true, beta: 3, ..Default::default() };
+        nodes[2] = pb::RangeNode { valid: true, beta: -1, ..Default::default() };
+        nodes[3] = pb::RangeNode { valid: false, beta: 9, ..Default::default() };
+        let msg = pb::RangeGraph { header: header(), num_rings: rings, num_cols: cols, azimuth_resolution_centideg: 10, nodes };
+        let (h, s) = proto_decode_range_graph(&msg.encode_to_vec()).unwrap();
+        assert_eq!(h, header());
+        assert_eq!((s.valid, s.clusters), (3, 1));
+
+        let bad = pb::RangeGraph { num_rings: 3, ..msg };
+        assert!(proto_decode_range_graph(&bad.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn diff_round_trip() {
+        let msg = pb::OccupancyGridDiff {
+            header: header(),
+            diffs: vec![pb::Diff { mx: 10, my: 20, old: 255, new: 254 }, pb::Diff { mx: 0, my: 1, old: 254, new: 0 }],
+        };
+        let (h, d) = proto_decode_diff(&msg.encode_to_vec()).unwrap();
+        assert_eq!(h, header());
+        assert_eq!(d, vec![(10, 20, 255, 254), (0, 1, 254, 0)]);
+
+        let bad = pb::OccupancyGridDiff { header: header(), diffs: vec![pb::Diff { mx: 0, my: 0, old: 0, new: 300 }] };
+        assert!(proto_decode_diff(&bad.encode_to_vec()).is_err());
     }
 }

@@ -21,6 +21,8 @@ pub mod config;
 #[path = "rslidar/costmap/mod.rs"]
 pub mod costmap;
 
+pub mod cev_proto;
+
 #[path = "rslidar/node/rslidar_math.rs"]
 pub mod rslidar_math;
 

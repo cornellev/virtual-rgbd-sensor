@@ -54,10 +54,10 @@ fn publisher<'a>(session: &'a zenoh::Session, key: &'static str) -> Result<Publi
 fn encode_points(header: &Header, point_step: u32, data: &[u8]) -> Vec<u8> {
     let width = data.len() as u32 / point_step;
     let mut buf = Vec::with_capacity(16 + data.len());
-    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
-    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
-    buf.extend_from_slice(&width.to_le_bytes());
-    buf.extend_from_slice(&point_step.to_le_bytes());
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes()); //0..4
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes()); //4..8
+    buf.extend_from_slice(&width.to_le_bytes()); //8..12
+    buf.extend_from_slice(&point_step.to_le_bytes()); //12..16
     buf.extend_from_slice(data);
     buf
 }
@@ -103,13 +103,13 @@ fn encode_costmap(header: &Header, map: &costmap_2d::Costmap2D) -> Vec<u8> {
     buf
 }
 
-// encode costmap as bits: stamp_sec: i32 + stamp_nanosec: u32 + len: u32
-// + diffs: len * (u16 + u16 + u8 + u8) (mx, my, old, new)
+// encode diff as bytes: stamp_sec: i32 + stamp_nanosec: u32 + len: u32
+// + diffs: len * (mx: u16 + my: u16 + old: u8 + new: u8) (mx, my, old, new)
 fn encode_diff(header: &Header, diff: &[Diff]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(16 + diff.len() * 6);
-    buf.extend_from_slice(&header.stamp_sec.to_le_bytes());
-    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes());
-    buf.extend_from_slice(&(diff.len() as u32).to_le_bytes());
+    let mut buf = Vec::with_capacity(16 + diff.len() * 6); 
+    buf.extend_from_slice(&header.stamp_sec.to_le_bytes()); //0..4
+    buf.extend_from_slice(&header.stamp_nanosec.to_le_bytes()); //4..8
+    buf.extend_from_slice(&(diff.len() as u32).to_le_bytes()); //8..12
     for d in diff {
         buf.extend_from_slice(&d.mx.to_le_bytes());
         buf.extend_from_slice(&d.my.to_le_bytes());
